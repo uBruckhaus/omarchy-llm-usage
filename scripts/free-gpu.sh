@@ -9,4 +9,4 @@ lms_bin="$(command -v lms || echo "$HOME/.lmstudio/bin/lms")"
 if [[ -x "$lms_bin" ]] && pgrep -f "lm-studio --run-as-service|\.lmstudio/extensions" >/dev/null; then
   "$lms_bin" unload --all >/dev/null 2>&1
 fi
-notify-send -a "LLM Usage" "GPU memory freed" "Local LLM models were unloaded." 2>/dev/null || true
+notify-send -a "LLM Monitor" "GPU memory freed" "Local LLM models were unloaded." 2>/dev/null || true

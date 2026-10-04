@@ -1,10 +1,10 @@
-# LLM Usage
+# LLM Monitor
 
-![LLM Usage — a local LLM monitor for your Omarchy bar](preview.png)
+![LLM Monitor — a local LLM monitor for your Omarchy bar](preview.png)
 
 **See at a glance when a local LLM is using your GPU, how much it holds, and who is using it.**
 
-LLM Usage is a small Omarchy bar widget for people who run local models with **llama.cpp**, **Ollama** or **LM Studio**.
+LLM Monitor is a small Omarchy bar widget for people who run local models with **llama.cpp**, **Ollama** or **LM Studio**.
 
 - **Bar indicator:** a chip icon. Dim while no model is loaded. While a model is resident it turns into the accent colour and shows the GPU memory held by local models (e.g. `󰘚 8.7G`), and it pulses while the GPU is generating. A `!` marks model memory that no longer fits in VRAM and was moved to system RAM.
 - **Detail panel (left click):**
