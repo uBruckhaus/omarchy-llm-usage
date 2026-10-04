@@ -50,6 +50,7 @@ Panel {
     width: parent ? parent.width : 200
     height: meterLabel.height + Style.space(10)
     Text {
+      textFormat: Text.PlainText
       id: meterLabel
       text: meter.label
       color: root.dim
@@ -57,6 +58,7 @@ Panel {
       font.pixelSize: Style.font.caption
     }
     Text {
+      textFormat: Text.PlainText
       anchors.right: parent.right
       text: meter.value
       color: root.fg
@@ -125,6 +127,7 @@ Panel {
             detail: root.stats.busy ? "generating" : (root.stats.active ? "idle" : "")
             iconComponent: Component {
               Text {
+                textFormat: Text.PlainText
                 text: "󰘚"
                 color: root.stats.active ? Color.accent : root.dim
                 font.family: root.font
@@ -142,6 +145,7 @@ Panel {
             width: parent.width
             height: totalText.height
             Text {
+              textFormat: Text.PlainText
               id: totalText
               text: root.gib(root.gpu.vram_used) + " of " + root.gib(root.gpu.vram_total) + " GiB in use"
               color: root.fg
@@ -150,6 +154,7 @@ Panel {
               font.bold: true
             }
             Text {
+              textFormat: Text.PlainText
               anchors.right: parent.right
               anchors.baseline: totalText.baseline
               text: root.gib(Math.max(0, (root.gpu.vram_total || 0) - (root.gpu.vram_used || 0))) + " GiB free"
@@ -200,6 +205,7 @@ Panel {
               border.color: root.dim
             }
             Text {
+              textFormat: Text.PlainText
               id: legendName
               anchors.left: swatchBox.right
               anchors.leftMargin: Style.space(8)
@@ -209,6 +215,7 @@ Panel {
               font.pixelSize: Style.font.caption
             }
             Text {
+              textFormat: Text.PlainText
               anchors.right: parent.right
               text: legend.amount
               color: root.fg
@@ -216,6 +223,7 @@ Panel {
               font.pixelSize: Style.font.caption
             }
             Text {
+              textFormat: Text.PlainText
               id: legendNote
               visible: legend.note !== ""
               anchors.top: legendName.bottom
@@ -254,6 +262,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: (root.stats.llm_spilled || 0) > 268435456
             width: parent.width
             wrapMode: Text.WordWrap
@@ -308,6 +317,7 @@ Panel {
                   border.color: block.loaded ? Color.accent : root.dim
                 }
                 Text {
+                  textFormat: Text.PlainText
                   id: runtimeName
                   anchors.left: dot.right
                   anchors.leftMargin: Style.space(8)
@@ -318,6 +328,7 @@ Panel {
                   font.bold: block.loaded
                 }
                 Text {
+                  textFormat: Text.PlainText
                   anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
                   text: root.runtimeState(block.modelData)
@@ -330,6 +341,7 @@ Panel {
               Repeater {
                 model: block.modelData.models
                 delegate: Text {
+                  textFormat: Text.PlainText
                   required property var modelData
                   width: block.width
                   leftPadding: Style.space(16)
@@ -344,6 +356,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 visible: block.modelData.running
                 width: block.width
                 leftPadding: Style.space(16)

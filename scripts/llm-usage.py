@@ -113,6 +113,31 @@ def system_stats():
 
 # --- Processes ----------------------------------------------------------------
 
+def clean(text, limit=120):
+    """Names from runtime APIs and /proc, safe to show in any Qt label.
+
+    Without "<" and ">" Qt never treats the text as rich text, so a model
+    or process name cannot carry markup such as remote images.
+    """
+    text = "".join(ch for ch in str(text or "") if ch.isprintable() and ch not in "<>&")
+    return text.strip()[:limit]
+
+
+def trusted(pid):
+    """Our own processes, or system services, which only root can start.
+
+    Another local account's processes would let that account choose the
+    names, model names and API answers this widget shows.
+    """
+    try:
+        if os.stat(f"/proc/{pid}").st_uid == os.getuid():
+            return True
+    except OSError:
+        return False
+    return any(line.split(":", 2)[-1].startswith("/system.slice/")
+               for line in read(f"/proc/{pid}/cgroup").splitlines())
+
+
 def classify(pid, comm, cmdline):
     # Several runtimes ship an engine called llama-server (Ollama 0.3x, LM Studio),
     # so the owning systemd unit and the executable path decide, not the name.
@@ -135,6 +160,8 @@ def process_table():
         pid = entry.name
         comm = read(f"/proc/{pid}/comm").strip()
         if comm not in ("llama-server", "ollama") and not comm.startswith("lm-studio"):
+            continue
+        if not trusted(pid):
             continue
         cmdline = read(f"/proc/{pid}/cmdline").replace("\0", " ").strip()
         runtime = classify(pid, comm, cmdline)
@@ -206,7 +233,7 @@ def model_from_cmdline(cmdline):
     if not match:
         return ""
     name = os.path.basename(match.group(1))
-    return re.sub(r"\.gguf$", "", name)
+    return clean(re.sub(r"\.gguf$", "", name))
 
 
 # --- Clients: who is talking to a runtime right now ----------------------------
@@ -239,7 +266,7 @@ def client_label(pid):
         return "opencode"
     if "lm-studio" in cmdline:
         return None
-    return comm or None
+    return clean(comm, 40) or None
 
 
 def clients_by_port():
@@ -259,7 +286,7 @@ def clients_by_port():
     found = {}
     for inode, runtime in inodes.items():
         pid = owners.get(inode)
-        label = client_label(pid) if pid else None
+        label = client_label(pid) if pid and trusted(pid) else None
         if label and label not in found.setdefault(runtime, []):
             found[runtime].append(label)
     return found
@@ -280,7 +307,7 @@ def llamacpp_models(processes):
                     ctx = int(args[args.index("--ctx-size") + 1])
                 except (ValueError, IndexError):
                     pass
-            models.append({"name": row.get("id", ""), "state": state, "context": ctx})
+            models.append({"name": clean(row.get("id")), "state": state, "context": ctx})
     if not models:
         for _, _, cmdline in processes:
             name = model_from_cmdline(cmdline)
@@ -291,7 +318,7 @@ def llamacpp_models(processes):
 
 def ollama_models():
     data = http_json(PORTS["ollama"], "/api/ps")
-    return [{"name": row.get("name", "").removesuffix(":latest"), "state": "loaded",
+    return [{"name": clean(str(row.get("name") or "").removesuffix(":latest")), "state": "loaded",
              "context": row.get("context_length"), "vram": row.get("size_vram")}
             for row in (data or {}).get("models", [])]
 
@@ -302,7 +329,7 @@ def lmstudio_models(processes):
     for row in (data or {}).get("models", []):
         for instance in row.get("loaded_instances", []):
             config = instance.get("config") or {}
-            models.append({"name": row.get("key", ""), "state": "loaded", "context": config.get("context_length")})
+            models.append({"name": clean(row.get("key")), "state": "loaded", "context": config.get("context_length")})
     if not models:
         # The daemon may run without its HTTP server; the engine's cmdline still names the model.
         for _, comm, cmdline in processes:
@@ -322,11 +349,11 @@ def other_gpu_apps(llm_pids, every=5):
         return _other_cache["apps"]
     usage = {}
     for entry in os.scandir("/proc"):
-        if not entry.name.isdigit() or entry.name in llm_pids:
+        if not entry.name.isdigit() or entry.name in llm_pids or not trusted(entry.name):
             continue
         resident, _ = proc_vram(entry.name)
         if resident >= 16 * 2**20:
-            name = read(f"/proc/{entry.name}/comm").strip() or entry.name
+            name = clean(read(f"/proc/{entry.name}/comm"), 40) or entry.name
             usage[name] = usage.get(name, 0) + resident
     _other_cache["apps"] = [{"name": name, "vram": vram} for name, vram in sorted(usage.items(), key=lambda item: -item[1])[:5]]
     return _other_cache["apps"]
