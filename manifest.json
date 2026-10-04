@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "ubruckhaus.llm-usage",
+  "name": "LLM Usage",
+  "version": "0.1.0",
+  "author": "uBruckhaus",
+  "description": "Local LLM monitor for the bar: shows when llama.cpp, Ollama or LM Studio holds a model on the GPU, with GPU memory split, load, CPU, RAM and clients per runtime.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "LLM Usage",
+    "description": "Local LLM monitor with GPU memory, CPU and RAM",
+    "category": "System",
+    "defaultSection": "right",
+    "allowMultiple": false
+  },
+  "license": "MIT"
+}
