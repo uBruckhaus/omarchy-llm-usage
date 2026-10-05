@@ -5,6 +5,7 @@
 set -u
 systemctl --user stop llama-server.service 2>/dev/null
 systemctl --user stop ollama.service 2>/dev/null
+systemctl --user stop vllm.service 2>/dev/null
 lms_bin="$(command -v lms || echo "$HOME/.lmstudio/bin/lms")"
 if [[ -x "$lms_bin" ]] && pgrep -f "lm-studio --run-as-service|\.lmstudio/extensions" >/dev/null; then
   "$lms_bin" unload --all >/dev/null 2>&1

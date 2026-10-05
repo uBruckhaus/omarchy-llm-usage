@@ -29,8 +29,22 @@ Panel {
     if (!value) return ""
     return value >= 1024 ? Math.round(value / 1024) + "k ctx" : value + " ctx"
   }
+  // Same green / yellow / orange / red levels as the bar chip.
+  function levelColor(fraction) {
+    return root.hostWidget && root.hostWidget.levelColor ? root.hostWidget.levelColor(fraction) : Color.accent
+  }
+  function rate(value) { return value === null || value === undefined ? "—" : value.toFixed(value >= 100 ? 0 : 1) }
+  readonly property var genSpeed: (root.stats.primary || {}).speed || null
+  function tokens(value) {
+    value = Number(value || 0)
+    return value >= 1000 ? (value / 1000).toFixed(value >= 10000 ? 0 : 1) + "k" : String(value)
+  }
+  function mib(bytes) {
+    bytes = Number(bytes || 0)
+    return bytes >= 1073741824 ? root.gib(bytes) + " GiB" : Math.round(bytes / 1048576) + " MiB"
+  }
   function runtimeState(runtime) {
-    if (!runtime.running) return "stopped"
+    if (!runtime.running) return runtime.installed === false ? "not installed" : "stopped"
     var resident = runtime.models.filter(function(model) { return model.state !== "sleeping" }).length
     if (resident) return resident === 1 ? "1 model loaded" : resident + " models loaded"
     if (runtime.models.length) return "model sleeping (GPU free)"
@@ -194,8 +208,10 @@ Panel {
             property string name: ""
             property string amount: ""
             property string note: ""
+            property real fraction: -1    // >= 0 draws a fill bar in the level colour
             width: parent ? parent.width : 300
             height: Math.max(legendName.height, legendNote.visible ? legendName.height + legendNote.height : 0)
+              + (fraction >= 0 ? Style.space(8) : 0)
             Rectangle {
               id: swatchBox
               y: (legendName.height - height) / 2
@@ -235,6 +251,23 @@ Panel {
               font.family: root.font
               font.pixelSize: Style.font.caption
             }
+            Rectangle {
+              visible: legend.fraction >= 0
+              anchors.bottom: parent.bottom
+              anchors.left: legendName.left
+              anchors.right: parent.right
+              height: Style.space(4)
+              radius: height / 2
+              color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.12)
+              Rectangle {
+                width: parent.width * Math.max(0, Math.min(1, legend.fraction))
+                height: parent.height
+                radius: parent.radius
+                color: root.levelColor(legend.fraction)
+                Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+                Behavior on color { ColorAnimation { duration: 400 } }
+              }
+            }
           }
 
           Column {
@@ -245,6 +278,33 @@ Panel {
               name: "LLM models"
               amount: root.gib(root.stats.llm_vram) + " GiB"
               note: "↑ this number is shown in the bar"
+            }
+            // The two buffers that fill while you work: the context (whole conversation)
+            // and the reply being generated. Memory is the KV cache those tokens occupy.
+            LegendRow {
+              readonly property var p: root.stats.primary || ({})
+              readonly property real filled: p.context ? (p.context_used || 0) / p.context : 0
+              visible: !!p.context && p.context_used !== null && p.context_used !== undefined
+              swatch: root.levelColor(filled)
+              name: "Context buffer"
+              amount: p.context_memory
+                ? "≈ " + root.mib(p.context_memory * filled) + " of " + root.mib(p.context_memory)
+                : Math.round(filled * 100) + "%"
+              note: root.tokens(p.context_used) + " / " + root.tokens(p.context) + " tokens (" + Math.round(filled * 100) + "%)"
+              fraction: filled
+            }
+            LegendRow {
+              readonly property var p: root.stats.primary || ({})
+              readonly property real filled: p.output_limit ? (p.output_used || 0) / p.output_limit : 0
+              visible: !!p.output_limit
+              swatch: root.levelColor(filled)
+              name: "Output buffer"
+              amount: p.context_memory && p.context
+                ? "≈ " + root.mib(p.context_memory * (p.output_used || 0) / p.context)
+                : Math.round(filled * 100) + "%"
+              note: (p.generating ? "generating " : "last reply ") + root.tokens(p.output_used) + " / "
+                + root.tokens(p.output_limit) + " tokens (" + Math.round(filled * 100) + "%)"
+              fraction: filled
             }
             LegendRow {
               swatch: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.5)
@@ -279,6 +339,20 @@ Panel {
               + (root.gpu.temp ? "  ·  " + Math.round(root.gpu.temp) + " °C" : "")
               + (root.gpu.power ? "  ·  " + Math.round(root.gpu.power) + " W" : "")
             fraction: (root.gpu.busy || 0) / 100
+          }
+
+          // Generation speed of the loaded model: live while it writes, plus
+          // min / avg / max over the replies since the monitor started watching it.
+          Meter {
+            visible: root.genSpeed !== null
+            label: "Speed" + (!root.genSpeed ? ""
+              : root.genSpeed.count
+                ? "  ·  min " + root.rate(root.genSpeed.min) + "  avg " + root.rate(root.genSpeed.avg) + "  max " + root.rate(root.genSpeed.max)
+                : root.genSpeed.avg ? "  ·  avg " + root.rate(root.genSpeed.avg) + " since load" : "")
+            value: root.genSpeed && root.genSpeed.now !== null && root.genSpeed.now !== undefined
+              ? root.rate(root.genSpeed.now) + " tok/s"
+              : (root.genSpeed && root.genSpeed.avg ? "idle" : "")
+            fraction: root.genSpeed && root.genSpeed.now ? root.genSpeed.now / Math.max(root.genSpeed.now, root.genSpeed.max || 0) : 0
           }
 
           PanelSectionHeader { text: "SYSTEM"; foreground: root.fg; fontFamily: root.font }
@@ -340,18 +414,65 @@ Panel {
 
               Repeater {
                 model: block.modelData.models
-                delegate: Text {
-                  textFormat: Text.PlainText
+                delegate: Column {
+                  id: modelBlock
                   required property var modelData
+                  readonly property bool hasUsage: modelData.context_used !== undefined && modelData.context_used !== null && modelData.context > 0
                   width: block.width
-                  leftPadding: Style.space(16)
-                  elide: Text.ElideMiddle
-                  text: "󰗚 " + modelData.name
-                    + (modelData.context ? "  ·  " + root.ctx(modelData.context) : "")
-                    + (modelData.state && modelData.state !== "loaded" ? "  ·  " + modelData.state : "")
-                  color: root.fg
-                  font.family: root.font
-                  font.pixelSize: Style.font.caption
+                  spacing: Style.space(3)
+                  Text {
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    leftPadding: Style.space(16)
+                    elide: Text.ElideMiddle
+                    text: "󰗚 " + modelBlock.modelData.name
+                      + (modelBlock.modelData.context && !modelBlock.hasUsage ? "  ·  " + root.ctx(modelBlock.modelData.context) : "")
+                      + (modelBlock.modelData.state && modelBlock.modelData.state !== "loaded" ? "  ·  " + modelBlock.modelData.state : "")
+                    color: root.fg
+                    font.family: root.font
+                    font.pixelSize: Style.font.caption
+                  }
+                  // Tokens in the context window, and the VRAM llama.cpp reserved for it (KV cache).
+                  Item {
+                    visible: modelBlock.hasUsage
+                    x: Style.space(16)
+                    width: parent.width - x
+                    height: visible ? Math.max(contextLabel.height, contextValue.height) + Style.space(8) : 0
+                    readonly property real fraction: modelBlock.hasUsage ? modelBlock.modelData.context_used / modelBlock.modelData.context : 0
+                    Text {
+                      textFormat: Text.PlainText
+                      id: contextLabel
+                      text: "Context"
+                        + (modelBlock.modelData.context_memory ? "  ·  " + root.mib(modelBlock.modelData.context_memory) + " VRAM" : "")
+                      color: root.dim
+                      font.family: root.font
+                      font.pixelSize: Style.font.caption
+                    }
+                    Text {
+                      textFormat: Text.PlainText
+                      id: contextValue
+                      anchors.right: parent.right
+                      text: root.tokens(modelBlock.modelData.context_used) + " / " + root.tokens(modelBlock.modelData.context)
+                        + " tokens (" + Math.round(parent.fraction * 100) + "%)"
+                      color: parent.fraction >= 0.9 ? root.levelColor(parent.fraction) : root.fg
+                      font.family: root.font
+                      font.pixelSize: Style.font.caption
+                    }
+                    Rectangle {
+                      anchors.bottom: parent.bottom
+                      width: parent.width
+                      height: Style.space(4)
+                      radius: height / 2
+                      color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.12)
+                      Rectangle {
+                        width: parent.width * Math.max(0, Math.min(1, parent.parent.fraction))
+                        height: parent.height
+                        radius: parent.radius
+                        color: root.levelColor(parent.parent.fraction)
+                        Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+                      }
+                    }
+                  }
                 }
               }
 
@@ -384,7 +505,7 @@ Panel {
               foreground: root.fg
               fontFamily: root.font
               enabled: root.stats.active === true
-              tooltipText: "Stop llama-server and Ollama, unload LM Studio models"
+              tooltipText: "Stop llama-server, Ollama and vLLM services, unload LM Studio models"
               onClicked: Quickshell.execDetached(["bash", root.hostWidget.scriptDir + "/free-gpu.sh"])
             }
             Button {

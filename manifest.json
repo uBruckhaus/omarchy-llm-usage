@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "ubruckhaus.llm-usage",
   "name": "LLM Monitor",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "author": "uBruckhaus",
-  "description": "Local LLM monitor for the bar: shows when llama.cpp, Ollama or LM Studio holds a model on the GPU, with GPU memory split, load, CPU, RAM and clients per runtime.",
+  "description": "Local LLM monitor for the bar: shows when llama.cpp, Ollama, LM Studio or vLLM holds a model on the GPU, how full its context and output buffers are (green to red), the GPU memory split, load, CPU, RAM and clients per runtime.",
   "kinds": [
     "bar-widget"
   ],
@@ -13,7 +13,7 @@
   },
   "barWidget": {
     "displayName": "LLM Monitor",
-    "description": "Local LLM monitor with GPU memory, CPU and RAM",
+    "description": "Local LLM monitor with context fill, GPU memory, CPU and RAM",
     "category": "System",
     "defaultSection": "right",
     "allowMultiple": false
