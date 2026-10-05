@@ -4,7 +4,9 @@
 Runtimes are identified by executable path and systemd cgroup, not by process
 name: LM Studio's engine is also called `llama-server`.
 
-- llama.cpp router  llama-server.service (or any other llama-server)
+- llama.cpp router  llama-server.service (or any other llama-server), plus the
+                    one-shot llama.cpp tools (llama-tts, llama-cli, ...) that load a
+                    model for a single run, e.g. Simple Reader's Qwen voices
 - Ollama            ollama serve / ollama runner
 - LM Studio         the lm-studio daemon and its bundled engines (~/.lmstudio)
 - vLLM              `vllm serve` / vllm.entrypoints and its VLLM::* engine processes
@@ -144,6 +146,12 @@ def trusted(pid):
                for line in read(f"/proc/{pid}/cgroup").splitlines())
 
 
+# One-shot llama.cpp programs: they load a model on the GPU for one run and serve
+# no HTTP API, so they report VRAM, CPU and RAM but no context or output buffers.
+# (/proc/<pid>/comm is cut to 15 characters.)
+LLAMACPP_TOOLS = ("llama-tts", "llama-cli", "llama-mtmd-cli", "llama-run", "llama-simple")
+
+
 def classify(pid, comm, cmdline):
     # Several runtimes ship an engine called llama-server (Ollama 0.3x, LM Studio),
     # so the owning systemd unit and the executable path decide, not the name.
@@ -152,7 +160,7 @@ def classify(pid, comm, cmdline):
         return "ollama"
     if ".lmstudio" in cmdline or "lm-studio" in cmdline or comm.startswith("lm-studio"):
         return "lmstudio"
-    if "llama-server.service" in cgroup or comm == "llama-server":
+    if "llama-server.service" in cgroup or comm == "llama-server" or comm in LLAMACPP_TOOLS:
         return "llamacpp"
     # vLLM renames its engine and worker processes to VLLM::EngineCore, VLLM::Worker...
     if comm.lower().startswith("vllm") or re.search(r"\bvllm(\s+serve\b|\.entrypoints)", cmdline):
@@ -169,7 +177,8 @@ def process_table():
         pid = entry.name
         comm = read(f"/proc/{pid}/comm").strip()
         maybe_vllm = comm.lower().startswith("vllm") or comm.startswith("python")
-        if comm not in ("llama-server", "ollama") and not comm.startswith("lm-studio") and not maybe_vllm:
+        if (comm not in ("llama-server", "ollama") + LLAMACPP_TOOLS
+                and not comm.startswith("lm-studio") and not maybe_vllm):
             continue
         if not trusted(pid):
             continue
@@ -276,6 +285,8 @@ def client_label(pid):
         return "pi"
     if "opencode" in cmdline:
         return "opencode"
+    if "kindle-reader" in cmdline or "KindleReader" in cmdline or "simple-reader" in cmdline:
+        return "Simple Reader"
     if "lm-studio" in cmdline:
         return None
     return clean(comm, 40) or None
@@ -456,7 +467,35 @@ def llamacpp_slots(model=None):
     return {"context_used": used, "context": size or None, **output, "speed": speed_report(state)}
 
 
+def tool_clients(processes):
+    """The programs that started one-shot llama.cpp tools (they have no socket to trace)."""
+    found = []
+    for pid, comm, _ in processes:
+        if comm not in LLAMACPP_TOOLS:
+            continue
+        stat = read(f"/proc/{pid}/stat")
+        try:
+            parent = stat[stat.rfind(")") + 2:].split()[1]
+        except IndexError:
+            continue
+        label = client_label(parent) if trusted(parent) else None
+        if label and label not in found:
+            found.append(label)
+    return found
+
+
 def llamacpp_models(processes):
+    tools = [(pid, cmdline) for pid, comm, cmdline in processes if comm in LLAMACPP_TOOLS]
+    processes = [process for process in processes if process[1] not in LLAMACPP_TOOLS]
+    models = [] if not processes else llamacpp_server_models(processes)
+    for _, cmdline in tools:
+        name = model_from_cmdline(cmdline)
+        if name and all(model["name"] != name for model in models):
+            models.append({"name": name, "state": "loaded", "context": None})
+    return models
+
+
+def llamacpp_server_models(processes):
     models = []
     data = http_json(PORTS["llamacpp"], "/models")
     for row in (data or {}).get("data", []):
@@ -648,6 +687,9 @@ def snapshot():
     if groups.get("vllm"):
         PORTS["vllm"] = vllm_port(groups["vllm"])
     clients = clients_by_port() if groups else {}
+    for label in tool_clients(groups.get("llamacpp", [])):
+        if label not in clients.setdefault("llamacpp", []):
+            clients["llamacpp"].append(label)
     runtimes, seen = [], set()
     installed = installed_runtimes()
     for runtime in RUNTIMES:
