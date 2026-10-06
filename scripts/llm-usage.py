@@ -328,15 +328,24 @@ CONTEXT_SWITCHES = {"-kvu", "--kv-unified", "-no-kvu", "--no-kv-unified", "--swa
 _context_memory = {}
 
 
-def context_memory(args):
-    """Bytes llama.cpp allocates for the context of a model started with `args`.
+def context_memory(pid):
+    """Bytes llama.cpp allocates for the context of the llama-server `pid`.
+
+    Binary and arguments come from /proc of that trusted process, never from
+    the HTTP API: any local account can answer on the port, so its replies
+    must not choose what runs here or which model file gets parsed.
 
     llama-fit-params (next to the llama-server binary) projects the memory
     breakdown without loading weights; `-dev none` keeps it off the GPU. The
     KV cache is allocated in full at load, so this is what the context holds
     in VRAM. Cached per argument set: it runs once per model load.
     """
-    if not args:
+    try:
+        binary = os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        return None
+    args = [arg for arg in read(f"/proc/{pid}/cmdline").split("\0") if arg]
+    if not args or not trusted(pid):
         return None
     wanted, index = [], 1
     while index < len(args):
@@ -350,9 +359,9 @@ def context_memory(args):
         index += 1
     if "-m" not in wanted:
         return None
-    key = tuple(wanted)
+    key = (binary, *wanted)
     if key not in _context_memory:
-        tool = os.path.join(os.path.dirname(args[0]), "llama-fit-params")
+        tool = os.path.join(os.path.dirname(binary), "llama-fit-params")
         total = None
         try:
             result = subprocess.run([tool, *wanted, "-dev", "none", "-lv", "4"],
@@ -511,16 +520,38 @@ def llamacpp_server_models(processes):
             model = {"name": clean(row.get("id")), "state": state, "context": ctx}
             if state == "loaded":
                 slots = llamacpp_slots(row.get("id"))
-                model.update(slots, context=slots.get("context") or ctx, context_memory=context_memory(args))
+                pid = server_for(processes, args)
+                model.update(slots, context=slots.get("context") or ctx,
+                             context_memory=context_memory(pid) if pid else None)
             models.append(model)
     if not models:
         for pid, _, cmdline in processes:
             name = model_from_cmdline(cmdline)
             if name:
-                args = read(f"/proc/{pid}/cmdline").split("\0")
                 models.append({"name": name, "state": "loaded", "context": None, **llamacpp_slots(),
-                               "context_memory": context_memory([arg for arg in args if arg])})
+                               "context_memory": context_memory(pid)})
     return models
+
+
+def server_for(processes, args):
+    """The trusted llama-server process running the model the API describes with `args`.
+
+    Router mode starts one child per model; the API only says which one, the
+    child's own /proc entry supplies everything that is acted on.
+    """
+    def model_path(argv):
+        for flag in ("-m", "--model"):
+            if flag in argv[:-1]:
+                return argv[argv.index(flag) + 1]
+        return None
+    wanted = model_path(args[1:])
+    for pid, comm, _ in processes:
+        if comm != "llama-server":
+            continue
+        argv = [arg for arg in read(f"/proc/{pid}/cmdline").split("\0") if arg]
+        if argv[1:] == list(args[1:]) or (wanted and model_path(argv[1:]) == wanted):
+            return pid
+    return None
 
 
 def ollama_models():
