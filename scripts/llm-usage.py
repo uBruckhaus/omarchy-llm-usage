@@ -17,6 +17,7 @@ Model details come from the runtimes' local HTTP APIs, which are only queried
 while the runtime is running (no API call ever starts a service).
 """
 import glob
+import http.client
 import importlib.util
 import json
 import os
@@ -46,11 +47,34 @@ def read(path, default=""):
         return default
 
 
-def http_json(port, path, timeout=0.6):
+# Whoever listens on a runtime's port answers, not necessarily the runtime:
+# replies are capped in size and total time so they cannot exhaust memory.
+HTTP_LIMIT = 4 * 2**20
+HTTP_DEADLINE = 2.0
+
+
+def http_get(port, path, timeout=0.6):
+    """Body of a local GET, or None when it fails, exceeds HTTP_LIMIT or HTTP_DEADLINE."""
+    deadline = time.monotonic() + HTTP_DEADLINE
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=timeout) as response:
-            return json.loads(response.read())
-    except (OSError, ValueError):
+            if int(response.headers.get("Content-Length") or 0) > HTTP_LIMIT:
+                return None
+            body = bytearray()
+            while chunk := response.read1(65536):
+                body += chunk
+                if len(body) > HTTP_LIMIT or time.monotonic() > deadline:
+                    return None
+            return bytes(body)
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
+
+
+def http_json(port, path, timeout=0.6):
+    body = http_get(port, path, timeout)
+    try:
+        return json.loads(body) if body is not None else None
+    except ValueError:
         return None
 
 
@@ -588,11 +612,10 @@ def vllm_port(processes):
 
 def prometheus(port, path="/metrics", prefix="vllm:"):
     """Prometheus samples from a runtime's metrics endpoint as {name: [(labels, value)]}."""
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=0.6) as response:
-            text = response.read().decode("utf-8", "replace")
-    except (OSError, ValueError):
+    body = http_get(port, path)
+    if body is None:
         return {}
+    text = body.decode("utf-8", "replace")
     samples = {}
     for line in text.splitlines():
         match = re.match(rf"^({re.escape(prefix)}[A-Za-z0-9_:]+)(\{{[^}}]*\}})?\s+(\S+)", line)
