@@ -19,6 +19,7 @@ while the runtime is running (no API call ever starts a service).
 import glob
 import http.client
 import importlib.util
+import io
 import json
 import os
 import re
@@ -28,7 +29,6 @@ import subprocess
 import sys
 import time
 import urllib.parse
-import urllib.request
 
 INTERVAL = float(os.environ.get("LLM_USAGE_INTERVAL", "2"))
 PAGE = os.sysconf("SC_PAGE_SIZE")
@@ -48,24 +48,59 @@ def read(path, default=""):
 
 
 # Whoever listens on a runtime's port answers, not necessarily the runtime:
-# replies are capped in size and total time so they cannot exhaust memory.
+# replies are capped in size and in total time, headers included, so they can
+# neither exhaust memory nor stall the collector.
 HTTP_LIMIT = 4 * 2**20
 HTTP_DEADLINE = 2.0
+
+
+class _DeadlineReader(io.RawIOBase):
+    """Socket reads that fail once `deadline` passes, however slowly bytes arrive."""
+
+    def __init__(self, sock, deadline, timeout):
+        self.sock, self.deadline, self.timeout = sock, deadline, timeout
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("HTTP deadline exceeded")
+        self.sock.settimeout(min(self.timeout, remaining))
+        return self.sock.recv_into(buffer)
+
+
+class _DeadlineSocket:
+    def __init__(self, sock, deadline, timeout):
+        self.reader = _DeadlineReader(sock, deadline, timeout)
+
+    def makefile(self, *args, **kwargs):
+        return io.BufferedReader(self.reader)
 
 
 def http_get(port, path, timeout=0.6):
     """Body of a local GET, or None when it fails, exceeds HTTP_LIMIT or HTTP_DEADLINE."""
     deadline = time.monotonic() + HTTP_DEADLINE
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=timeout) as response:
-            if int(response.headers.get("Content-Length") or 0) > HTTP_LIMIT:
-                return None
-            body = bytearray()
-            while chunk := response.read1(65536):
-                body += chunk
-                if len(body) > HTTP_LIMIT or time.monotonic() > deadline:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout) as sock:
+            sock.sendall(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+                         "Accept: application/json, text/plain\r\nConnection: close\r\n\r\n".encode())
+            response = http.client.HTTPResponse(_DeadlineSocket(sock, deadline, timeout), method="GET")
+            try:
+                response.begin()
+                if not 200 <= response.status < 300:
                     return None
-            return bytes(body)
+                if int(response.headers.get("Content-Length") or 0) > HTTP_LIMIT:
+                    return None
+                body = bytearray()
+                while chunk := response.read1(65536):
+                    body += chunk
+                    if len(body) > HTTP_LIMIT:
+                        return None
+                return bytes(body)
+            finally:
+                response.close()
     except (OSError, ValueError, http.client.HTTPException):
         return None
 
