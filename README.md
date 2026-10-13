@@ -18,6 +18,12 @@ LLM Monitor is a small Omarchy bar widget for people who run local models with *
   - **Free GPU memory** button and a **btop** shortcut.
 - **Right click:** opens btop.
 
+## Languages and settings
+
+The interface is built in in eight languages: English, German (Deutsch), French (Français), Spanish (Español), Italian (Italiano), Portuguese (Português), Dutch (Nederlands) and Polish (Polski). It follows the system language (`LC_ALL`, `LC_MESSAGES`, `LANG`) and falls back to English. To pick another one, open the **gear (⚙)** at the top right of the panel → **Language**. The translations ship with the plugin: nothing is downloaded or generated, and the plugin makes no extra requests for them. The choice is stored in the widget's own entry in `~/.config/omarchy/shell.json` (`"language"`); **System (…)** removes it again.
+
+The settings page opens from the gear and closes with **← Back**, Backspace or Esc.
+
 ## Install
 
 Requires Omarchy Quattro's plugin-capable Quickshell and `python3` (standard library only, no extra packages). No setup script is needed.
@@ -31,7 +37,7 @@ GPU memory, load, temperature and power are read from the amdgpu sysfs and DRM `
 
 ## How it works
 
-A collector (`scripts/llm-usage.py`) runs while the widget is loaded and streams one snapshot every two seconds (about 1–2 % of one CPU core, ~25 MiB RAM).
+A collector (`scripts/llm-monitor.py`) runs while the widget is loaded and streams one snapshot every two seconds (about 1–2 % of one CPU core, ~25 MiB RAM).
 
 - **Read-only by default.** It reads `/proc`, sysfs and the runtimes' local status endpoints on `127.0.0.1` (llama.cpp 8080, Ollama 11434, LM Studio 1234, vLLM 8000 or its `--port`) **only while that runtime is already running**. It never starts, stops or reconfigures a runtime by itself and sends nothing to the network.
 - **Runtimes are told apart by systemd unit and executable path**, because Ollama and LM Studio both ship an engine named `llama-server`.
@@ -65,7 +71,7 @@ The plugin creates no files, services or settings outside its own folder, so not
 ## Development
 
 ```sh
-python3 scripts/llm-usage.py --once | python3 -m json.tool
+python3 scripts/llm-monitor.py --once | python3 -m json.tool
 omarchy plugin validate .
 ```
 

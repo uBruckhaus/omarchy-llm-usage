@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stream local-LLM usage as one JSON line per interval (stdlib only).
+"""LLM Monitor collector: stream local-LLM usage as one JSON line per interval (stdlib only).
 
 Runtimes are identified by executable path and systemd cgroup, not by process
 name: LM Studio's engine is also called `llama-server`.

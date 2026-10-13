@@ -4,6 +4,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui as Ui
+import "I18n.js" as I18n
 
 // Bar indicator for local LLMs. Dim chip while nothing is loaded; accent chip
 // plus resident GPU memory while a runtime holds a model; the chip pulses
@@ -60,6 +61,21 @@ Ui.BarWidget {
     function onAccentChanged() { themeColors.reload() }
   }
 
+  // Interface language: the system's unless one is picked in the panel's
+  // settings (stored in this widget's own shell.json entry).
+  readonly property string systemLang: I18n.systemLanguage(Quickshell.env("LC_ALL"), Quickshell.env("LC_MESSAGES"), Quickshell.env("LANG"))
+  readonly property string languageSetting: String(root.setting("language", "auto"))
+  readonly property string lang: I18n.resolve(languageSetting, systemLang)
+  function t(key, args) { return I18n.tr(lang, key, args) }
+  function tn(key, n, args) { return I18n.trn(lang, key, n, args) }
+  function setLanguage(code) {
+    if (!root.bar || !root.bar.shell || typeof root.bar.shell.updateEntryInline !== "function") return
+    var next = Object.assign({}, root.settings || {})
+    if (code === "auto") delete next.language
+    else next.language = code
+    root.bar.shell.updateEntryInline(root.moduleName, next)
+  }
+
   readonly property string barText: {
     if (!active) return "󰘚"
     // "!" marks model memory that was evicted from VRAM (overcommitted GPU).
@@ -68,28 +84,27 @@ Ui.BarWidget {
   }
   readonly property string summary: {
     var gpu = stats.gpu || {}
-    var vram = "Bar shows LLM GPU memory: " + gib(stats.llm_vram) + " GiB\n"
-      + "GPU total in use: " + gib(gpu.vram_used) + " of " + gib(gpu.vram_total) + " GiB (incl. desktop & apps " + gib(stats.other_vram) + " GiB)"
-    if (!active || !stats.primary) return "No local LLM loaded\n" + vram
+    var vram = t("tipBarShows", [gib(stats.llm_vram)]) + "\n"
+      + t("tipGpuTotal", [gib(gpu.vram_used), gib(gpu.vram_total), gib(stats.other_vram)])
+    if (!active || !stats.primary) return t("noLlm") + "\n" + vram
     var primary = stats.primary
     var context = primary.context && primary.context_used !== null && primary.context_used !== undefined
-      ? "Context: " + primary.context_used + " / " + primary.context + " tokens ("
-        + Math.round(100 * primary.context_used / primary.context) + "%)"
-        + (primary.context_memory ? ", " + (primary.context_memory / 1048576).toFixed(0) + " MiB VRAM" : "") + "\n"
+      ? t("tipContext", [primary.context_used, primary.context, Math.round(100 * primary.context_used / primary.context)])
+        + (primary.context_memory ? ", " + t("tipContextVram", [(primary.context_memory / 1048576).toFixed(0)]) : "") + "\n"
       : ""
     var speed = primary.speed && (primary.speed.now || primary.speed.avg)
-      ? "Speed: " + (primary.speed.now ? primary.speed.now.toFixed(1) + " tok/s now" : "idle")
-        + (primary.speed.avg ? " · avg " + primary.speed.avg.toFixed(1) : "")
-        + (primary.speed.count ? " (min " + primary.speed.min.toFixed(1) + ", max " + primary.speed.max.toFixed(1) + ")" : "") + "\n"
+      ? t("tipSpeed", [(primary.speed.now ? t("tokNow", [primary.speed.now.toFixed(1)]) : t("idle"))
+        + (primary.speed.avg ? " · " + t("avgN", [primary.speed.avg.toFixed(1)]) : "")
+        + (primary.speed.count ? " (" + t("minMax", [primary.speed.min.toFixed(1), primary.speed.max.toFixed(1)]) + ")" : "")]) + "\n"
       : ""
-    return primary.runtime + (primary.model ? " · " + primary.model : "") + "\n" + (busy ? "Generating · " : "") + context + speed + vram
+    return primary.runtime + (primary.model ? " · " + primary.model : "") + "\n" + (busy ? t("generatingDot") : "") + context + speed + vram
   }
 
   // One collector streams a JSON snapshot every two seconds. It never starts
   // a runtime; it only reads /proc, sysfs and the runtimes' local APIs.
   Process {
     id: collector
-    command: ["python3", root.scriptDir + "/llm-usage.py"]
+    command: ["python3", root.scriptDir + "/llm-monitor.py"]
     running: true
     stdout: SplitParser {
       onRead: function(line) {
