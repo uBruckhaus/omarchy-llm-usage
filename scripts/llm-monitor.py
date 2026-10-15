@@ -385,6 +385,16 @@ CONTEXT_FLAGS = {
 }
 CONTEXT_SWITCHES = {"-kvu", "--kv-unified", "-no-kvu", "--no-kv-unified", "--swa-full"}
 _context_memory = {}
+MAX_TRACKED = 16   # entries per cache below: models come and go, the oldest are dropped
+
+
+def remember(cache, key, value):
+    """Store in a cache that never holds more than MAX_TRACKED entries (oldest out first)."""
+    cache.pop(key, None)
+    cache[key] = value
+    while len(cache) > MAX_TRACKED:
+        cache.pop(next(iter(cache)))
+    return value
 
 
 def context_memory(pid):
@@ -431,7 +441,7 @@ def context_memory(pid):
                 total = sum(int(row) for row in rows) * 2**20
         except (OSError, subprocess.SubprocessError):
             pass
-        _context_memory[key] = total
+        remember(_context_memory, key, total)
     return _context_memory[key]
 
 
@@ -440,9 +450,22 @@ _speed = {}
 
 
 def speed_state(key):
-    """Generation-speed bookkeeping per runtime and model, kept while the collector runs."""
-    return _speed.setdefault(key, {"rates": [], "tokens": 0.0, "seconds": 0.0,
-                                   "counters": None, "live": None, "now": None, "server_avg": None})
+    """Generation-speed bookkeeping per runtime and model while the model is listed
+    (forget_models); at most MAX_TRACKED of them."""
+    state = _speed.get(key) or {"rates": [], "tokens": 0.0, "seconds": 0.0,
+                                "counters": None, "live": None, "now": None, "server_avg": None}
+    return remember(_speed, key, state)
+
+
+def forget_models(runtime, listed):
+    """Drop the speed and last-reply state of models the runtime no longer lists:
+    model ids come from an unauthenticated localhost API, so what is kept for
+    them must not grow with every new id."""
+    for key in [k for k in _speed if k[0] == runtime and k[1] not in listed]:
+        del _speed[key]
+    if runtime == "llamacpp":
+        for key in [k for k in _last_output if k not in listed]:
+            del _last_output[key]
 
 
 def speed_add(state, tokens, seconds):
@@ -515,7 +538,7 @@ def llamacpp_slots(model=None):
         output["output_used"] += decoded
         output["output_limit"] += limit
         output["generating"] = True
-    key = model or ""
+    key = clean(model) if model else ""
     state = speed_state(("llamacpp", key))
     now, live = time.monotonic(), state["live"]
     state["now"] = None
@@ -529,7 +552,7 @@ def llamacpp_slots(model=None):
         state["live"] = None
     llamacpp_speed(model, state)
     if output["generating"]:
-        _last_output[key] = output
+        remember(_last_output, key, output)
     else:
         output = dict(_last_output.get(key) or output, generating=False)
     return {"context_used": used, "context": size or None, **output, "speed": speed_report(state)}
@@ -583,6 +606,7 @@ def llamacpp_server_models(processes):
                 model.update(slots, context=slots.get("context") or ctx,
                              context_memory=context_memory(pid) if pid else None)
             models.append(model)
+    forget_models("llamacpp", {model["name"] for model in models} | ({""} if not models else set()))
     if not models:
         for pid, _, cmdline in processes:
             name = model_from_cmdline(cmdline)
