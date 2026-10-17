@@ -3,6 +3,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui as Ui
 import "I18n.js" as I18n
 
@@ -31,7 +32,7 @@ Ui.BarWidget {
   // Context level in the theme's named colours: green < 50 % ≤ yellow < 75 % ≤ orange < 90 % ≤ red.
   property var levelPalette: ({ green: "#9cba64", yellow: "#d9ab5e", orange: "#e09355", red: "#db6c4f" })
   function levelColor(fraction) {
-    return fraction < 0 ? Color.accent
+    return fraction < 0 ? Commons.Color.accent
       : fraction >= 0.9 ? levelPalette.red
       : fraction >= 0.75 ? levelPalette.orange
       : fraction >= 0.5 ? levelPalette.yellow
@@ -41,7 +42,7 @@ Ui.BarWidget {
 
   FileView {
     id: themeColors
-    path: Color.currentThemePath + "/colors.toml"
+    path: Commons.Color.currentThemePath + "/colors.toml"
     printErrors: false
     onLoaded: {
       var found = {}
@@ -57,7 +58,7 @@ Ui.BarWidget {
   }
   // A theme switch changes the accent; re-read the named colours with it.
   Connections {
-    target: Color
+    target: Commons.Color
     function onAccentChanged() { themeColors.reload() }
   }
 
@@ -165,7 +166,7 @@ Ui.BarWidget {
     bar: root.bar
     text: root.barText
     dimmed: !root.active
-    readonly property color base: root.bar ? root.bar.barForeground : Color.foreground
+    readonly property color base: root.bar ? root.bar.barForeground : Commons.Color.foreground
     foreground: root.active ? Qt.tint(root.contextColor, Qt.rgba(base.r, base.g, base.b, root.glow * 0.75)) : base
     tooltipText: root.opened ? "" : root.summary
     onPressed: function(code) {

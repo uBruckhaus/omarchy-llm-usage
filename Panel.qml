@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import Quickshell
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "I18n.js" as I18n
 
@@ -20,7 +21,7 @@ Panel {
   readonly property var gpu: stats.gpu || ({})
   readonly property var system: stats.system || ({})
   readonly property var runtimes: stats.runtimes || []
-  readonly property color fg: Color.popups.text
+  readonly property color fg: Commons.Color.popups.text
   readonly property color dim: Qt.darker(fg, 1.45)
   readonly property string font: root.bar ? root.bar.fontFamily : Style.font.family
 
@@ -32,7 +33,7 @@ Panel {
   }
   // Same green / yellow / orange / red levels as the bar chip.
   function levelColor(fraction) {
-    return root.hostWidget && root.hostWidget.levelColor ? root.hostWidget.levelColor(fraction) : Color.accent
+    return root.hostWidget && root.hostWidget.levelColor ? root.hostWidget.levelColor(fraction) : Commons.Color.accent
   }
   function rate(value) { return value === null || value === undefined ? "—" : value.toFixed(value >= 100 ? 0 : 1) }
   readonly property var genSpeed: (root.stats.primary || {}).speed || null
@@ -109,7 +110,7 @@ Panel {
         width: parent.width * Math.max(0, Math.min(1, meter.highlight))
         height: parent.height
         radius: parent.radius
-        color: Color.accent
+        color: Commons.Color.accent
       }
     }
   }
@@ -185,7 +186,7 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 text: "󰘚"
-                color: root.stats.active ? Color.accent : root.dim
+                color: root.stats.active ? Commons.Color.accent : root.dim
                 font.family: root.font
                 font.pixelSize: Style.font.display
               }
@@ -306,7 +307,7 @@ Panel {
                 Rectangle {
                   width: stack.width * Math.min(1, (root.stats.llm_vram || 0) / stack.total)
                   height: parent.height
-                  color: Color.accent
+                  color: Commons.Color.accent
                 }
                 Rectangle {
                   width: stack.width * Math.min(1, (root.stats.other_vram || 0) / stack.total)
@@ -389,7 +390,7 @@ Panel {
               width: parent.width
               spacing: Style.space(4)
               LegendRow {
-                swatch: Color.accent
+                swatch: Commons.Color.accent
                 name: root.t("llmModels")
                 amount: root.gib(root.stats.llm_vram) + " GiB"
                 note: root.t("shownInBar")
@@ -442,7 +443,7 @@ Panel {
               width: parent.width
               wrapMode: Text.WordWrap
               text: root.t("spilled", [root.gib(root.stats.llm_spilled)])
-              color: Color.urgent
+              color: Commons.Color.urgent
               font.family: root.font
               font.pixelSize: Style.font.caption
             }
@@ -500,9 +501,9 @@ Panel {
                     id: dot
                     anchors.verticalCenter: parent.verticalCenter
                     width: Style.space(8); height: width; radius: width / 2
-                    color: block.loaded ? Color.accent : (block.modelData.running ? root.dim : "transparent")
+                    color: block.loaded ? Commons.Color.accent : (block.modelData.running ? root.dim : "transparent")
                     border.width: 1
-                    border.color: block.loaded ? Color.accent : root.dim
+                    border.color: block.loaded ? Commons.Color.accent : root.dim
                   }
                   Text {
                     textFormat: Text.PlainText
@@ -520,7 +521,7 @@ Panel {
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     text: root.runtimeState(block.modelData)
-                    color: block.loaded ? Color.accent : root.dim
+                    color: block.loaded ? Commons.Color.accent : root.dim
                     font.family: root.font
                     font.pixelSize: Style.font.caption
                   }
