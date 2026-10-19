@@ -586,26 +586,42 @@ def llamacpp_models(processes):
     return models
 
 
+# A router lists every model it knows and each loaded one costs a /slots request:
+# only the first MAX_MODELS active rows are looked at, and the follow-ups stop once
+# FOLLOW_UP_BUDGET seconds have passed, so a squatter on the port listing
+# thousands of slow models delays one snapshot by seconds, not hours.
+MAX_MODELS = 8
+FOLLOW_UP_BUDGET = 4.0
+
+
+def listed(data, key):
+    """The dict rows of a JSON list field (other shapes give none)."""
+    rows = data.get(key) if isinstance(data, dict) else None
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
 def llamacpp_server_models(processes):
     models = []
     data = http_json(PORTS["llamacpp"], "/models")
-    for row in (data or {}).get("data", []):
-        state = (row.get("status") or {}).get("value", "")
-        if state in ("loaded", "loading", "sleeping"):
-            ctx = None
-            args = (row.get("status") or {}).get("args") or []
-            if "--ctx-size" in args:
-                try:
-                    ctx = int(args[args.index("--ctx-size") + 1])
-                except (ValueError, IndexError):
-                    pass
-            model = {"name": clean(row.get("id")), "state": state, "context": ctx}
-            if state == "loaded":
-                slots = llamacpp_slots(row.get("id"))
-                pid = server_for(processes, args)
-                model.update(slots, context=slots.get("context") or ctx,
-                             context_memory=context_memory(pid) if pid else None)
-            models.append(model)
+    stop = time.monotonic() + FOLLOW_UP_BUDGET
+    rows = [row for row in listed(data, "data") if isinstance(row.get("status"), dict)
+            and row["status"].get("value") in ("loaded", "loading", "sleeping")]
+    for row in rows[:MAX_MODELS]:
+        state = row["status"]["value"]
+        ctx = None
+        args = row["status"].get("args") or []
+        if "--ctx-size" in args:
+            try:
+                ctx = int(args[args.index("--ctx-size") + 1])
+            except (ValueError, IndexError):
+                pass
+        model = {"name": clean(row.get("id")), "state": state, "context": ctx}
+        if state == "loaded" and time.monotonic() < stop:
+            slots = llamacpp_slots(row.get("id"))
+            pid = server_for(processes, args)
+            model.update(slots, context=slots.get("context") or ctx,
+                         context_memory=context_memory(pid) if pid else None)
+        models.append(model)
     forget_models("llamacpp", {model["name"] for model in models} | ({""} if not models else set()))
     if not models:
         for pid, _, cmdline in processes:
@@ -641,16 +657,16 @@ def ollama_models():
     data = http_json(PORTS["ollama"], "/api/ps")
     return [{"name": clean(str(row.get("name") or "").removesuffix(":latest")), "state": "loaded",
              "context": row.get("context_length"), "vram": row.get("size_vram")}
-            for row in (data or {}).get("models", [])]
+            for row in listed(data, "models")[:MAX_MODELS]]
 
 
 def lmstudio_models(processes):
     models = []
     data = http_json(PORTS["lmstudio"], "/api/v1/models") if port_open(PORTS["lmstudio"]) else None
-    for row in (data or {}).get("models", []):
-        for instance in row.get("loaded_instances", []):
-            config = instance.get("config") or {}
-            models.append({"name": clean(row.get("key")), "state": "loaded", "context": config.get("context_length")})
+    loaded = [(row, instance) for row in listed(data, "models") for instance in listed(row, "loaded_instances")]
+    for row, instance in loaded[:MAX_MODELS]:
+        config = instance.get("config") or {}
+        models.append({"name": clean(row.get("key")), "state": "loaded", "context": config.get("context_length")})
     if not models:
         # The daemon may run without its HTTP server; the engine's cmdline still names the model.
         for _, comm, cmdline in processes:
@@ -717,9 +733,7 @@ def vllm_models(processes):
     if metrics:
         state["counters"] = (generated, now)
     models = []
-    for row in (data or {}).get("data", []):
-        if not isinstance(row, dict) or row.get("parent"):  # skip LoRA adapters
-            continue
+    for row in [row for row in listed(data, "data") if not row.get("parent")][:MAX_MODELS]:  # skip LoRA adapters
         model = {"name": clean(row.get("id")), "state": "loaded", "context": row.get("max_model_len"),
                  "generating": running > 0, "speed": speed_report(state)}
         if capacity and usage is not None:
