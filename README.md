@@ -24,6 +24,8 @@ The interface is built in in eight languages: English, German (Deutsch), French 
 
 The settings page opens from the gear and closes with **← Back**, Backspace or Esc.
 
+The **ⓘ** button beside the gear opens an **Information** page with a card for each of the author's other plugins in the Omarchy Plugin Marketplace, with a short description in the panel's language. A click on a card opens that plugin's marketplace page in the browser (a fixed `https://plugins.omarchy.org/plugin.html?id=…` address); nothing is downloaded. **← Back**, Backspace or Esc returns.
+
 ## Install
 
 Requires Omarchy Quattro's plugin-capable Quickshell and `python3` (standard library only, no extra packages). No setup script is needed.

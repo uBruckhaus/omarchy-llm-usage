@@ -59,6 +59,7 @@ Panel {
 
   // Settings page (gear in the header). Back with the button, Backspace or Esc.
   property bool settingsOpen: false
+  property bool infoOpen: false
   readonly property string lang: hostWidget ? hostWidget.lang : "en"
   readonly property string languageSetting: hostWidget ? hostWidget.languageSetting : "auto"
   readonly property string systemLang: hostWidget ? hostWidget.systemLang : "en"
@@ -66,7 +67,7 @@ Panel {
   function tn(key, n, args) { return I18n.trn(lang, key, n, args) }
 
   function open() { root.controller.show() }
-  function close() { root.controller.hide(); root.settingsOpen = false }
+  function close() { root.infoOpen = false; root.controller.hide(); root.settingsOpen = false }
   function toggle() { if (root.opened) root.close(); else root.open() }
 
   component Meter: Item {
@@ -128,8 +129,9 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      onCloseRequested: { if (root.settingsOpen) root.settingsOpen = false; else root.close() }
-      onTextKey: function(text) { if (text === "\b" && root.settingsOpen) root.settingsOpen = false }
+      onCloseRequested: { if (root.infoOpen) root.infoOpen = false; else if (root.settingsOpen) root.settingsOpen = false; else root.close() }
+      onTextKey: function(text) {
+        if (text === "\b" && root.infoOpen) { root.infoOpen = false; return } if (text === "\b" && root.settingsOpen) root.settingsOpen = false }
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
       Flickable {
@@ -158,14 +160,31 @@ Panel {
               // As tall as the hero text, with the gear centred on the title
               // row so it lines up with the detail pill.
               Item {
-                visible: !root.settingsOpen
-                implicitWidth: gearButton.width
+                visible: !root.settingsOpen && !root.infoOpen
+                implicitWidth: gearButton.x + gearButton.width
                 implicitHeight: heroTitle.implicitHeight + Style.space(2) + heroMeta.implicitHeight
                 Text { id: heroTitle; visible: false; textFormat: Text.PlainText; text: "W"; font.family: root.font; font.pixelSize: Style.font.title; font.bold: true }
                 Text { id: heroBody; visible: false; textFormat: Text.PlainText; text: "W"; font.family: root.font; font.pixelSize: Style.font.body; font.bold: true }
                 Text { id: heroMeta; visible: false; textFormat: Text.PlainText; text: "W"; font.family: root.font; font.pixelSize: Style.font.caption; font.bold: true }
                 Button {
+                  id: infoButton
+                  x: 0
+                  y: gearButton.y
+                  height: gearButton.height
+                  width: height
+                  iconText: "\u{F02FC}"
+                  bordered: true
+                  iconSize: Style.font.body
+                  horizontalPadding: Style.space(4)
+                  verticalPadding: Style.space(1)
+                  foreground: root.fg
+                  fontFamily: root.font
+                  tooltipText: root.t("information")
+                  onClicked: root.infoOpen = true
+                }
+                Button {
                   id: gearButton
+                  x: infoButton.x + infoButton.width + Style.space(6)
                   y: Math.round((heroTitle.implicitHeight - height) / 2)
                   // The pill is its body text plus Style.space(4); a square gear of that height.
                   height: heroBody.implicitHeight + Style.space(4)
@@ -190,6 +209,52 @@ Panel {
                 font.family: root.font
                 font.pixelSize: Style.font.display
               }
+            }
+          }
+
+
+          // ---------------------------------------------------------------- information
+          Column {
+            visible: root.infoOpen
+            width: parent.width
+            spacing: Style.space(12)
+
+            PanelSeparator { width: parent.width; foreground: root.fg }
+
+            Row {
+              spacing: Style.space(12)
+              Button {
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.t("back") + " · \u232b"
+                iconText: "\udb80\udc4d"
+                bordered: true
+                foreground: root.fg
+                fontFamily: root.font
+                tooltipText: root.t("backTip")
+                onClicked: root.infoOpen = false
+              }
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: root.t("information").toUpperCase()
+                color: root.fg
+                font.family: root.font
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.letterSpacing: 1
+              }
+            }
+            PanelSeparator { width: parent.width; foreground: root.fg }
+
+            MorePlugins {
+              width: parent.width
+              separated: false
+              ownId: "ubruckhaus.llm-usage"
+              lang: root.lang
+              fg: root.fg
+              dim: root.dim
+              fontFamily: root.font
+              onOpened: root.close()
             }
           }
 
@@ -262,7 +327,7 @@ Panel {
 
           // ---------------------------------------------------------------- main view
           Column {
-            visible: !root.settingsOpen
+            visible: !root.settingsOpen && !root.infoOpen
             width: parent.width
             spacing: Style.space(10)
 
