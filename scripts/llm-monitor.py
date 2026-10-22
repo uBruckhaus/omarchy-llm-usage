@@ -685,20 +685,47 @@ def vllm_port(processes):
     return 8000
 
 
+MAX_METRIC_LINE = 4096     # longer exposition lines are skipped unread
+MAX_METRIC_SAMPLES = 2000  # samples kept per scrape; vLLM and llama.cpp export a few hundred
+LABEL_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)="((?:[^"\\]|\\.)*)"(,?)')
+
+
+def metric_labels(text):
+    """{name: value} of a sample's label set, e.g. 'a="1",b="2"'; None if it is malformed.
+
+    Each label is matched once at the position where the previous one ended (no
+    scanning for a later start), so the work is linear in the line's length."""
+    labels, pos = {}, 0
+    while pos < len(text):
+        match = LABEL_RE.match(text, pos)
+        if not match or (not match.group(3) and match.end() != len(text)):
+            return None
+        labels[match.group(1)] = match.group(2)
+        pos = match.end()
+    return labels
+
+
 def prometheus(port, path="/metrics", prefix="vllm:"):
     """Prometheus samples from a runtime's metrics endpoint as {name: [(labels, value)]}."""
     body = http_get(port, path)
     if body is None:
         return {}
     text = body.decode("utf-8", "replace")
-    samples = {}
+    samples, count = {}, 0
     for line in text.splitlines():
-        match = re.match(rf"^({re.escape(prefix)}[A-Za-z0-9_:]+)(\{{[^}}]*\}})?\s+(\S+)", line)
+        if count >= MAX_METRIC_SAMPLES:
+            break
+        if len(line) > MAX_METRIC_LINE or not line.startswith(prefix):
+            continue
+        match = re.match(rf"({re.escape(prefix)}[A-Za-z0-9_:]+)(?:\{{([^}}]*)\}})?[ \t]+([^ \t]+)", line)
         if not match:
             continue
-        labels = dict(re.findall(r'(\w+)="([^"]*)"', match.group(2) or ""))
+        labels = metric_labels(match.group(2) or "")
+        if labels is None:
+            continue
         try:
             samples.setdefault(match.group(1), []).append((labels, float(match.group(3))))
+            count += 1
         except ValueError:
             pass
     return samples
