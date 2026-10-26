@@ -46,7 +46,7 @@ A collector (`scripts/llm-monitor.py`) runs while the widget is loaded and strea
 - **Runtimes are told apart by systemd unit and executable path**, because Ollama and LM Studio both ship an engine named `llama-server`.
 - **One-shot llama.cpp tools** (`llama-tts`, `llama-cli`, `llama-mtmd-cli`, ...) count as llama.cpp while they run, e.g. Simple Reader's Qwen voices. They have no HTTP API, so they show the model, VRAM, CPU, RAM and the program that started them, but no context or output buffers.
 - **GPU memory per runtime** comes from DRM `fdinfo` (`drm-resident-vram`), so only memory that is really in VRAM is counted; requested-but-evicted memory is reported separately.
-- **Context and output buffers.** llama.cpp: tokens from `/slots`; the KV-cache size is projected once per model load with `llama-fit-params` from the same llama.cpp build (CPU only, nothing is loaded onto the GPU). vLLM: KV-cache fill from `/metrics` (`kv_cache_usage_perc`, pool size from `cache_config_info`); vLLM does not report a per-reply output limit, so it has no output-buffer row. Ollama and LM Studio report only the configured context size.
+- **Context and output buffers.** llama.cpp: tokens from `/slots`, with the context counted once when the slots share a unified KV cache (llama.cpp's default when the number of slots is automatic) and added up when each slot has its own part; the KV-cache size is projected once per model load with `llama-fit-params` from the same llama.cpp build (CPU only, nothing is loaded onto the GPU). vLLM: KV-cache fill from `/metrics` (`kv_cache_usage_perc`, pool size from `cache_config_info`); vLLM does not report a per-reply output limit, so it has no output-buffer row. Ollama and LM Studio report only the configured context size.
 - **Installed or not** is checked about once a minute (command on `PATH`, systemd unit, LM Studio's `~/.lmstudio`, or the `vllm` Python package), so a runtime you never installed shows *not installed* instead of *stopped*.
 
 ### Free GPU memory (the only action that changes runtime state)
@@ -56,7 +56,7 @@ Only when you click **Free GPU memory**, `scripts/free-gpu.sh` runs:
 - `systemctl --user stop llama-server.service ollama.service vllm.service` (user units only, no root),
 - `lms unload --all` if the LM Studio daemon is running (its daemon keeps running).
 
-This stops those local AI services for every program using them at that moment.
+This stops those local AI services for every program using them at that moment. A notification says what was stopped, what could not be stopped, or that nothing was running (a server started by hand has to be stopped where it runs).
 
 ## Update or remove
 

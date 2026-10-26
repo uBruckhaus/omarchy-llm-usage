@@ -21,9 +21,11 @@ import http.client
 import importlib.util
 import io
 import json
+import math
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -105,10 +107,15 @@ def http_get(port, path, timeout=0.6):
         return None
 
 
+def _no_constant(name):
+    raise ValueError(f"{name} is not a number JSON.parse accepts")
+
+
 def http_json(port, path, timeout=0.6):
+    """Parsed JSON of a local GET; replies with NaN or Infinity count as no reply."""
     body = http_get(port, path, timeout)
     try:
-        return json.loads(body) if body is not None else None
+        return json.loads(body, parse_constant=_no_constant) if body is not None else None
     except ValueError:
         return None
 
@@ -434,7 +441,7 @@ def context_memory(pid):
         total = None
         try:
             result = subprocess.run([tool, *wanted, "-dev", "none", "-lv", "4"],
-                                    capture_output=True, text=True, timeout=30)
+                                    capture_output=True, text=True, timeout=30, preexec_fn=_die_with_parent)
             # "|   - Host   |   7444 =  4935 +  1877 +  631   |": model + context + compute
             rows = re.findall(r"\|\s+- .*?\|\s+\d+\s*=\s*\d+\s*\+\s*(\d+)\s*\+\s*\d+", result.stderr + result.stdout)
             if rows:
@@ -443,6 +450,16 @@ def context_memory(pid):
             pass
         remember(_context_memory, key, total)
     return _context_memory[key]
+
+
+def _die_with_parent():
+    """In a helper process: end it when the collector ends (PR_SET_PDEATHSIG), so a
+    collector killed while it waits does not leave the helper running."""
+    try:
+        import ctypes
+        ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGKILL)
+    except (OSError, AttributeError):
+        pass
 
 
 _last_output = {}
@@ -511,33 +528,52 @@ def llamacpp_speed(model, state):
     state["server_avg"] = tokens / seconds if tokens > 0 and seconds > 0 else None
 
 
-def llamacpp_slots(model=None):
-    """Context and output fill, summed over the server's slots.
+def number(value, default=0):
+    """An int from a runtime's reply, or `default` for anything else (text, NaN, a list)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
 
-    context_used: tokens in the slots (n_prompt_tokens counts generated ones too).
-    output_used / output_limit: tokens generated for the reply in progress and
-    the most it may produce (n_predict, or what is left of the context). The
-    last reply's figures stay visible after it ends, marked as not generating.
+
+def llamacpp_slots(model=None, unified=True):
+    """Context and output fill over the server's slots.
+
+    context: with a unified KV cache all slots share one pool and each reports
+    all of it as its n_ctx; otherwise each slot has its own part and the parts
+    add up. context_used: tokens in the slots (n_prompt_tokens counts generated
+    ones too). output_used / output_limit: tokens generated for the reply in
+    progress and the most it may produce (n_predict, or what is left of the
+    context). The last reply's figures stay visible after it ends, marked as
+    not generating.
     """
     path = "/slots" + (f"?model={urllib.parse.quote(model)}" if model else "")
     slots = http_json(PORTS["llamacpp"], path)
     slots = [slot for slot in slots if isinstance(slot, dict)] if isinstance(slots, list) else []
     if not slots:
         return {}
-    used = sum(int(slot.get("n_prompt_tokens") or 0) for slot in slots)
-    size = sum(int(slot.get("n_ctx") or 0) for slot in slots)
+    used = sum(max(0, number(slot.get("n_prompt_tokens"))) for slot in slots)
+    sizes = [max(0, number(slot.get("n_ctx"))) for slot in slots]
+    size = max(sizes) if unified else sum(sizes)
     output = {"output_used": 0, "output_limit": 0, "generating": False}
-    tasks = tuple(sorted(slot.get("id_task") for slot in slots if slot.get("is_processing")))
+    tasks = tuple(sorted(str(slot.get("id_task")) for slot in slots if slot.get("is_processing")))
+    unlimited = False
     for slot in slots:
         if not slot.get("is_processing"):
             continue
-        decoded = sum(int(token.get("n_decoded") or 0) for token in slot.get("next_token") or [] if isinstance(token, dict))
-        limit = int((slot.get("params") or {}).get("n_predict") or -1)
+        tokens = slot.get("next_token") if isinstance(slot.get("next_token"), list) else []
+        decoded = sum(max(0, number(token.get("n_decoded"))) for token in tokens if isinstance(token, dict))
+        params = slot.get("params") if isinstance(slot.get("params"), dict) else {}
+        limit = number(params.get("n_predict"), -1)
         if limit <= 0:  # unlimited: the reply can grow until the context is full
-            limit = max(decoded, int(slot.get("n_ctx") or 0) - int(slot.get("n_prompt_tokens") or 0) + decoded)
+            unlimited = True
+            limit = max(decoded, max(0, number(slot.get("n_ctx"))) - max(0, number(slot.get("n_prompt_tokens"))) + decoded)
         output["output_used"] += decoded
         output["output_limit"] += limit
         output["generating"] = True
+    if unified and unlimited:
+        # Replies in a shared pool grow into the same free space: count it once.
+        output["output_limit"] = min(output["output_limit"], output["output_used"] + max(0, size - used))
     key = clean(model) if model else ""
     state = speed_state(("llamacpp", key))
     now, live = time.monotonic(), state["live"]
@@ -600,6 +636,54 @@ def listed(data, key):
     return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
 
+ENV_TRUE = ("1", "true", "on", "yes", "enabled")
+ENV_FALSE = ("0", "false", "off", "no", "disabled")
+
+
+def argv_list(args):
+    """A runtime API's argument list as strings (anything else gives none)."""
+    return [arg for arg in args if isinstance(arg, str)] if isinstance(args, list) else []
+
+
+def server_settings(args, env=None):
+    """(requested context or None, unified KV cache) of a llama-server.
+
+    Read like llama.cpp does: arguments in order (the last one wins), then its
+    LLAMA_ARG_* environment for what the arguments leave out. The cache is
+    unified unless set otherwise or the number of slots is given (-np > 0).
+    """
+    env = env or {}
+    ctx = parallel = unified = None
+    for index, arg in enumerate(args):
+        value = args[index + 1] if index + 1 < len(args) else None
+        if arg in ("-c", "--ctx-size"):
+            ctx = number(value, None)
+        elif arg in ("-np", "--parallel"):
+            parallel = number(value, None)
+        elif arg in ("-kvu", "--kv-unified"):
+            unified = True
+        elif arg in ("-no-kvu", "--no-kv-unified"):
+            unified = False
+    if ctx is None:
+        ctx = number(env.get("LLAMA_ARG_CTX_SIZE"), None)
+    if parallel is None:
+        parallel = number(env.get("LLAMA_ARG_N_PARALLEL"), None)
+    if unified is None:
+        flag = str(env.get("LLAMA_ARG_KV_UNIFIED", "")).lower()
+        unified = True if flag in ENV_TRUE else False if flag in ENV_FALSE else None
+    if unified is None:
+        unified = parallel is None or parallel <= 0
+    return (ctx if ctx and ctx > 0 else None), unified
+
+
+def proc_env(pid):
+    """The environment of one of our own (or a system) process, else empty."""
+    if not trusted(pid):
+        return {}
+    pairs = (item.partition("=") for item in read(f"/proc/{pid}/environ").split("\0") if item)
+    return {key: value for key, _, value in pairs if key.startswith("LLAMA_ARG_")}
+
+
 def llamacpp_server_models(processes):
     models = []
     data = http_json(PORTS["llamacpp"], "/models")
@@ -608,17 +692,13 @@ def llamacpp_server_models(processes):
             and row["status"].get("value") in ("loaded", "loading", "sleeping")]
     for row in rows[:MAX_MODELS]:
         state = row["status"]["value"]
-        ctx = None
-        args = row["status"].get("args") or []
-        if "--ctx-size" in args:
-            try:
-                ctx = int(args[args.index("--ctx-size") + 1])
-            except (ValueError, IndexError):
-                pass
+        args = argv_list(row["status"].get("args"))
+        pid = server_for(processes, args)
+        ctx, unified = server_settings(args[1:], proc_env(pid) if pid else None)
         model = {"name": clean(row.get("id")), "state": state, "context": ctx}
         if state == "loaded" and time.monotonic() < stop:
-            slots = llamacpp_slots(row.get("id"))
-            pid = server_for(processes, args)
+            # The slots report the context as allocated (llama.cpp rounds -c up).
+            slots = llamacpp_slots(row.get("id"), unified)
             model.update(slots, context=slots.get("context") or ctx,
                          context_memory=context_memory(pid) if pid else None)
         models.append(model)
@@ -627,7 +707,11 @@ def llamacpp_server_models(processes):
         for pid, _, cmdline in processes:
             name = model_from_cmdline(cmdline)
             if name:
-                models.append({"name": name, "state": "loaded", "context": None, **llamacpp_slots(),
+                argv = [arg for arg in read(f"/proc/{pid}/cmdline").split("\0") if arg]
+                ctx, unified = server_settings(argv[1:], proc_env(pid))
+                slots = llamacpp_slots(unified=unified)
+                models.append({"name": name, "state": "loaded", **slots,
+                               "context": slots.get("context") or ctx,
                                "context_memory": context_memory(pid)})
     return models
 
@@ -665,7 +749,7 @@ def lmstudio_models(processes):
     data = http_json(PORTS["lmstudio"], "/api/v1/models") if port_open(PORTS["lmstudio"]) else None
     loaded = [(row, instance) for row in listed(data, "models") for instance in listed(row, "loaded_instances")]
     for row, instance in loaded[:MAX_MODELS]:
-        config = instance.get("config") or {}
+        config = instance.get("config") if isinstance(instance.get("config"), dict) else {}
         models.append({"name": clean(row.get("key")), "state": "loaded", "context": config.get("context_length")})
     if not models:
         # The daemon may run without its HTTP server; the engine's cmdline still names the model.
@@ -724,10 +808,12 @@ def prometheus(port, path="/metrics", prefix="vllm:"):
         if labels is None:
             continue
         try:
-            samples.setdefault(match.group(1), []).append((labels, float(match.group(3))))
-            count += 1
+            value = float(match.group(3))
         except ValueError:
-            pass
+            continue
+        if math.isfinite(value):  # NaN or +Inf would break the sums and the JSON output
+            samples.setdefault(match.group(1), []).append((labels, value))
+            count += 1
     return samples
 
 
@@ -741,13 +827,17 @@ def vllm_models(processes):
     port = PORTS["vllm"]
     data = http_json(port, "/v1/models")
     metrics = prometheus(port)
-    usage = (metrics.get("vllm:kv_cache_usage_perc") or metrics.get("vllm:gpu_cache_usage_perc") or [({}, None)])[0][1]
-    capacity = None
+    # One pool per engine (data parallel): match usage and size by the engine label.
+    pools = {}
     for labels, _ in metrics.get("vllm:cache_config_info", []):
-        try:
-            capacity = int(labels["num_gpu_blocks"]) * int(labels["block_size"])
-        except (KeyError, ValueError):
-            pass
+        size = max(0, number(labels.get("num_gpu_blocks"))) * max(0, number(labels.get("block_size")))
+        if size:
+            pools[labels.get("engine", "")] = size
+    capacity, usage_samples = sum(pools.values()), metrics.get("vllm:kv_cache_usage_perc") or metrics.get("vllm:gpu_cache_usage_perc") or []
+    used = None
+    for labels, value in usage_samples:
+        pool = pools.get(labels.get("engine", "")) or (next(iter(pools.values())) if len(pools) == 1 else 0)
+        used = (used or 0) + min(1.0, max(0.0, value)) * pool
     running = sum(value for _, value in metrics.get("vllm:num_requests_running", []))
     generated = sum(value for _, value in metrics.get("vllm:generation_tokens_total", []))
     state, now = speed_state(("vllm", port)), time.monotonic()
@@ -763,8 +853,8 @@ def vllm_models(processes):
     for row in [row for row in listed(data, "data") if not row.get("parent")][:MAX_MODELS]:  # skip LoRA adapters
         model = {"name": clean(row.get("id")), "state": "loaded", "context": row.get("max_model_len"),
                  "generating": running > 0, "speed": speed_report(state)}
-        if capacity and usage is not None:
-            model.update(context=capacity, context_used=round(usage * capacity))
+        if capacity and used is not None:
+            model.update(context=capacity, context_used=round(used))
         models.append(model)
     return models
 
@@ -862,16 +952,19 @@ def snapshot():
             requested += wanted
         if elapsed:
             cpu = round(100.0 * ticks / TICKS / elapsed / CPUS, 1)
-        if not processes:
+        try:
+            if not processes:
+                models = []
+            elif runtime == "llamacpp":
+                models = llamacpp_models(processes)
+            elif runtime == "ollama":
+                models = ollama_models()
+            elif runtime == "vllm":
+                models = vllm_models(processes)
+            else:
+                models = lmstudio_models(processes)
+        except Exception:  # a reply of an unexpected shape: no model details this time
             models = []
-        elif runtime == "llamacpp":
-            models = llamacpp_models(processes)
-        elif runtime == "ollama":
-            models = ollama_models()
-        elif runtime == "vllm":
-            models = vllm_models(processes)
-        else:
-            models = lmstudio_models(processes)
         runtimes.append({"id": runtime, "name": NAMES[runtime], "running": bool(processes),
                          "installed": bool(processes) or installed.get(runtime, True),
                          "processes": len(processes), "cpu": cpu if elapsed else None,
