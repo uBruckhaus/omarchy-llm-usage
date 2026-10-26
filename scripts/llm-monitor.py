@@ -42,10 +42,13 @@ RUNTIMES = ("llamacpp", "ollama", "lmstudio", "vllm")
 
 
 def read(path, default=""):
+    """Text of a /proc or sysfs file. Process names and command lines are chosen by
+    the process's owner, any local user, so bytes that are not UTF-8 are replaced
+    instead of raising."""
     try:
-        with open(path) as handle:
+        with open(path, encoding="utf-8", errors="replace") as handle:
             return handle.read()
-    except OSError:
+    except (OSError, ValueError):
         return default
 
 
@@ -504,7 +507,7 @@ def helper_argv(argv, parent=None):
 
 def run_helper(argv, timeout):
     """subprocess.run of a helper program, bound to the collector's lifetime."""
-    return subprocess.run(helper_argv(argv), capture_output=True, text=True, timeout=timeout,
+    return subprocess.run(helper_argv(argv), capture_output=True, text=True, errors="replace", timeout=timeout,
                           stdin=subprocess.DEVNULL)
 
 
@@ -1088,7 +1091,10 @@ def encode(data):
 def main():
     once = "--once" in sys.argv
     install_exit_handlers()
-    snapshot()  # prime CPU counters
+    try:
+        snapshot()  # prime CPU counters
+    except Exception:  # the next snapshots report the problem
+        pass
     time.sleep(0.5 if once else min(INTERVAL, 1))
     while True:
         try:
