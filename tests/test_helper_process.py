@@ -68,21 +68,35 @@ class HelperArgv(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertTrue(os.path.exists(marker))
 
-    def test_without_setpriv(self):
+    def test_without_setpriv_nothing_runs(self):
+        """Without a parent-death signal a collector killed with SIGKILL (GNOME's
+        force_exit) would leave the helper behind: the projection is skipped."""
         mon.shutil.which = lambda name: None
-        self.assertEqual(mon.helper_argv(["/x/llama-fit-params"]), ["/x/llama-fit-params"])
+        self.assertIsNone(mon.helper_argv(["/x/llama-fit-params"]))
+        real = mon.subprocess.Popen
 
+        def refuse(*_a, **_k):
+            raise AssertionError("a helper was started without setpriv")
+        mon.subprocess.Popen = refuse
+        try:
+            self.assertIsNone(mon.run_helper(["/x/llama-fit-params"], timeout=5))
+        finally:
+            mon.subprocess.Popen = real
+
+    @unittest.skipUnless(shutil.which("setpriv"), "util-linux setpriv not installed")
     def test_output_is_bounded(self):
         start = time.monotonic()
         self.assertIsNone(mon.run_helper(["sh", "-c", "exec yes"], timeout=20, limit=2**20))
         self.assertIsNone(mon.run_helper(["sh", "-c", "head -c 3000000 /dev/zero >&2"], timeout=20, limit=2**20))
         self.assertLess(time.monotonic() - start, 10)
 
+    @unittest.skipUnless(shutil.which("setpriv"), "util-linux setpriv not installed")
     def test_timeout_kills_the_helper(self):
         start = time.monotonic()
         self.assertIsNone(mon.run_helper(["sleep", "30"], timeout=0.5))
         self.assertLess(time.monotonic() - start, 5)
 
+    @unittest.skipUnless(shutil.which("setpriv"), "util-linux setpriv not installed")
     def test_output_of_both_streams(self):
         text = mon.run_helper(["sh", "-c", "echo one >&2; echo two; printf '\\377'"], timeout=10)
         self.assertIn("one", text)
@@ -134,6 +148,7 @@ class HelperEndsWithCollector(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    @unittest.skipUnless(shutil.which("setpriv"), "util-linux setpriv not installed")
     def test_sigterm_ends_the_helper(self):
         collector, helper = self.start()
         collector.send_signal(signal.SIGTERM)

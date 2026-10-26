@@ -489,16 +489,16 @@ PARENT_GUARD = '[ "$PPID" = "$1" ] || exit 1; shift; exec "$@"'
 
 
 def helper_argv(argv, parent=None):
-    """`argv` so that the helper ends with the collector.
+    """`argv` so that the helper ends with the collector, or None without setpriv.
 
     util-linux setpriv sets PR_SET_PDEATHSIG (SIGKILL) and execs; the fixed
     shell guard then checks that the collector is still its parent. No Python
-    code runs between fork and exec. Without setpriv the helper runs as is
-    (the collector still kills it when told to stop, see install_exit_handlers).
+    code runs between fork and exec. Without setpriv nothing would end the
+    helper when the collector is killed with SIGKILL, so it does not run.
     """
     setpriv = shutil.which("setpriv")
     if not setpriv:
-        return list(argv)
+        return None
     parent = os.getpid() if parent is None else parent
     return [setpriv, "--pdeathsig", "KILL", "--", "/bin/sh", "-c", PARENT_GUARD, "sh", str(parent), *argv]
 
@@ -508,13 +508,16 @@ HELPER_OUTPUT_LIMIT = 2**20  # llama-fit-params prints a few KiB
 
 def run_helper(argv, timeout, limit=HELPER_OUTPUT_LIMIT):
     """stdout and stderr of a helper program as one text, or None when it cannot
-    start, runs longer than `timeout` seconds or prints more than `limit` bytes.
+    start (or setpriv is missing), runs longer than `timeout` seconds or prints more than `limit` bytes.
 
     The helper is bound to the collector's lifetime (helper_argv) and is killed
     and reaped whenever this returns or raises (SystemExit on SIGTERM included).
     """
+    argv = helper_argv(argv)
+    if argv is None:
+        return None
     try:
-        process = subprocess.Popen(helper_argv(argv), stdin=subprocess.DEVNULL,
+        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
