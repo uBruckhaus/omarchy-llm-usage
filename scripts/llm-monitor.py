@@ -111,13 +111,43 @@ def _no_constant(name):
     raise ValueError(f"{name} is not a number JSON.parse accepts")
 
 
+def _finite_float(text):
+    """A JSON number as float; valid JSON such as 1e999 overflows to infinity."""
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"{text[:20]} does not fit a float")
+    return value
+
+
 def http_json(port, path, timeout=0.6):
-    """Parsed JSON of a local GET; replies with NaN or Infinity count as no reply."""
+    """Parsed JSON of a local GET; replies with NaN, Infinity or a number that
+    overflows (1e999) count as no reply."""
     body = http_get(port, path, timeout)
     try:
-        return json.loads(body, parse_constant=_no_constant) if body is not None else None
-    except ValueError:
+        return json.loads(body, parse_constant=_no_constant, parse_float=_finite_float) if body is not None else None
+    except (ValueError, RecursionError):
         return None
+
+
+# Token counts, context sizes and byte sizes from a runtime: larger values are
+# not real (2**53 is also where JavaScript numbers stop being exact).
+MAX_QUANTITY = 2**53
+
+
+def finite(value):
+    """`value` if it is a finite int or float, else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value if isinstance(value, int) or math.isfinite(value) else None
+
+
+def quantity(value):
+    """A count or size from a runtime's reply as an int in 0..MAX_QUANTITY, else None
+    (text, lists, booleans, negative, NaN, infinite or absurdly large numbers)."""
+    value = finite(value)
+    if value is None or not 0 <= value <= MAX_QUANTITY:
+        return None
+    return int(value)
 
 
 def port_open(port):
@@ -151,9 +181,10 @@ def gpu_stats():
         return None
     def number(path, scale=1.0):
         try:
-            return float(read(path).strip()) / scale
+            value = float(read(path).strip()) / scale
         except ValueError:
             return None
+        return value if math.isfinite(value) else None
     uevent = read(f"{GPU_DIR}/uevent")
     match = re.search(r"PCI_SLOT_NAME=(\S+)", uevent)
     return {
@@ -440,8 +471,7 @@ def context_memory(pid):
         tool = os.path.join(os.path.dirname(binary), "llama-fit-params")
         total = None
         try:
-            result = subprocess.run([tool, *wanted, "-dev", "none", "-lv", "4"],
-                                    capture_output=True, text=True, timeout=30, preexec_fn=_die_with_parent)
+            result = run_helper([tool, *wanted, "-dev", "none", "-lv", "4"], timeout=30)
             # "|   - Host   |   7444 =  4935 +  1877 +  631   |": model + context + compute
             rows = re.findall(r"\|\s+- .*?\|\s+\d+\s*=\s*\d+\s*\+\s*(\d+)\s*\+\s*\d+", result.stderr + result.stdout)
             if rows:
@@ -452,14 +482,39 @@ def context_memory(pid):
     return _context_memory[key]
 
 
-def _die_with_parent():
-    """In a helper process: end it when the collector ends (PR_SET_PDEATHSIG), so a
-    collector killed while it waits does not leave the helper running."""
-    try:
-        import ctypes
-        ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGKILL)
-    except (OSError, AttributeError):
-        pass
+# Run by setpriv after it has set the parent-death signal: a collector that died
+# before that leaves the helper with another parent, so it ends instead of running.
+PARENT_GUARD = '[ "$PPID" = "$1" ] || exit 1; shift; exec "$@"'
+
+
+def helper_argv(argv, parent=None):
+    """`argv` so that the helper ends with the collector.
+
+    util-linux setpriv sets PR_SET_PDEATHSIG (SIGKILL) and execs; the fixed
+    shell guard then checks that the collector is still its parent. No Python
+    code runs between fork and exec. Without setpriv the helper runs as is
+    (the collector still kills it when told to stop, see install_exit_handlers).
+    """
+    setpriv = shutil.which("setpriv")
+    if not setpriv:
+        return list(argv)
+    parent = os.getpid() if parent is None else parent
+    return [setpriv, "--pdeathsig", "KILL", "--", "/bin/sh", "-c", PARENT_GUARD, "sh", str(parent), *argv]
+
+
+def run_helper(argv, timeout):
+    """subprocess.run of a helper program, bound to the collector's lifetime."""
+    return subprocess.run(helper_argv(argv), capture_output=True, text=True, timeout=timeout,
+                          stdin=subprocess.DEVNULL)
+
+
+def install_exit_handlers():
+    """SIGTERM / SIGHUP end the collector through SystemExit, so subprocess.run
+    kills and reaps a helper it is waiting on instead of leaving it behind."""
+    def stop(signum, _frame):
+        raise SystemExit(128 + signum)
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, stop)
 
 
 _last_output = {}
@@ -486,8 +541,9 @@ def forget_models(runtime, listed):
 
 
 def speed_add(state, tokens, seconds):
-    if tokens > 0 and seconds > 0:
-        state["rates"] = (state["rates"] + [tokens / seconds])[-500:]
+    rate = finite(tokens / seconds) if tokens > 0 and seconds > 0 else None
+    if rate is not None:
+        state["rates"] = (state["rates"] + [rate])[-500:]
         state["tokens"] += tokens
         state["seconds"] += seconds
 
@@ -499,10 +555,11 @@ def speed_report(state):
     it is there right after the monitor starts; min and max need finished replies.
     """
     rates = state["rates"]
-    avg = state["server_avg"] or (state["tokens"] / state["seconds"] if state["seconds"] else None)
-    if not rates and state["now"] is None and avg is None:
+    avg = finite(state["server_avg"] or (state["tokens"] / state["seconds"] if state["seconds"] else None))
+    now = finite(state["now"])
+    if not rates and now is None and avg is None:
         return None
-    return {"now": state["now"], "count": len(rates), "avg": avg,
+    return {"now": now, "count": len(rates), "avg": avg,
             "min": min(rates) if rates else None, "max": max(rates) if rates else None}
 
 
@@ -525,15 +582,17 @@ def llamacpp_speed(model, state):
     elif previous:  # counters went back: the model was reloaded
         state.update(rates=[], tokens=0.0, seconds=0.0)
     state["counters"] = (tokens, seconds)
-    state["server_avg"] = tokens / seconds if tokens > 0 and seconds > 0 else None
+    state["server_avg"] = finite(tokens / seconds) if tokens > 0 and seconds > 0 else None
 
 
 def number(value, default=0):
-    """An int from a runtime's reply, or `default` for anything else (text, NaN, a list)."""
+    """An int from a runtime's reply, or `default` for anything else (text, NaN,
+    infinity, a list, more than MAX_QUANTITY either way)."""
     try:
-        return int(value)
+        value = int(value)
     except (TypeError, ValueError, OverflowError):
         return default
+    return value if -MAX_QUANTITY <= value <= MAX_QUANTITY else default
 
 
 def llamacpp_slots(model=None, unified=True):
@@ -591,7 +650,9 @@ def llamacpp_slots(model=None, unified=True):
         remember(_last_output, key, output)
     else:
         output = dict(_last_output.get(key) or output, generating=False)
-    return {"context_used": used, "context": size or None, **output, "speed": speed_report(state)}
+    output.update(output_used=min(MAX_QUANTITY, output["output_used"]), output_limit=min(MAX_QUANTITY, output["output_limit"]))
+    return {"context_used": min(MAX_QUANTITY, used), "context": min(MAX_QUANTITY, size) or None,
+            **output, "speed": speed_report(state)}
 
 
 def tool_clients(processes):
@@ -740,7 +801,7 @@ def server_for(processes, args):
 def ollama_models():
     data = http_json(PORTS["ollama"], "/api/ps")
     return [{"name": clean(str(row.get("name") or "").removesuffix(":latest")), "state": "loaded",
-             "context": row.get("context_length"), "vram": row.get("size_vram")}
+             "context": quantity(row.get("context_length")), "vram": quantity(row.get("size_vram"))}
             for row in listed(data, "models")[:MAX_MODELS]]
 
 
@@ -750,7 +811,7 @@ def lmstudio_models(processes):
     loaded = [(row, instance) for row in listed(data, "models") for instance in listed(row, "loaded_instances")]
     for row, instance in loaded[:MAX_MODELS]:
         config = instance.get("config") if isinstance(instance.get("config"), dict) else {}
-        models.append({"name": clean(row.get("key")), "state": "loaded", "context": config.get("context_length")})
+        models.append({"name": clean(row.get("key")), "state": "loaded", "context": quantity(config.get("context_length"))})
     if not models:
         # The daemon may run without its HTTP server; the engine's cmdline still names the model.
         for _, comm, cmdline in processes:
@@ -771,6 +832,7 @@ def vllm_port(processes):
 
 MAX_METRIC_LINE = 4096     # longer exposition lines are skipped unread
 MAX_METRIC_SAMPLES = 2000  # samples kept per scrape; vLLM and llama.cpp export a few hundred
+MAX_METRIC_VALUE = 1e15    # larger samples are not real; sums of 2,000 of them stay finite
 LABEL_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)="((?:[^"\\]|\\.)*)"(,?)')
 
 
@@ -811,7 +873,8 @@ def prometheus(port, path="/metrics", prefix="vllm:"):
             value = float(match.group(3))
         except ValueError:
             continue
-        if math.isfinite(value):  # NaN or +Inf would break the sums and the JSON output
+        # NaN, +Inf or huge values would break the sums and the JSON output.
+        if math.isfinite(value) and abs(value) <= MAX_METRIC_VALUE:
             samples.setdefault(match.group(1), []).append((labels, value))
             count += 1
     return samples
@@ -830,10 +893,10 @@ def vllm_models(processes):
     # One pool per engine (data parallel): match usage and size by the engine label.
     pools = {}
     for labels, _ in metrics.get("vllm:cache_config_info", []):
-        size = max(0, number(labels.get("num_gpu_blocks"))) * max(0, number(labels.get("block_size")))
+        size = min(MAX_QUANTITY, max(0, number(labels.get("num_gpu_blocks"))) * max(0, number(labels.get("block_size"))))
         if size:
             pools[labels.get("engine", "")] = size
-    capacity, usage_samples = sum(pools.values()), metrics.get("vllm:kv_cache_usage_perc") or metrics.get("vllm:gpu_cache_usage_perc") or []
+    capacity, usage_samples = min(MAX_QUANTITY, sum(pools.values())), metrics.get("vllm:kv_cache_usage_perc") or metrics.get("vllm:gpu_cache_usage_perc") or []
     used = None
     for labels, value in usage_samples:
         pool = pools.get(labels.get("engine", "")) or (next(iter(pools.values())) if len(pools) == 1 else 0)
@@ -851,10 +914,10 @@ def vllm_models(processes):
         state["counters"] = (generated, now)
     models = []
     for row in [row for row in listed(data, "data") if not row.get("parent")][:MAX_MODELS]:  # skip LoRA adapters
-        model = {"name": clean(row.get("id")), "state": "loaded", "context": row.get("max_model_len"),
+        model = {"name": clean(row.get("id")), "state": "loaded", "context": quantity(row.get("max_model_len")),
                  "generating": running > 0, "speed": speed_report(state)}
         if capacity and used is not None:
-            model.update(context=capacity, context_used=round(used))
+            model.update(context=capacity, context_used=min(capacity, round(used)))
         models.append(model)
     return models
 
@@ -1000,17 +1063,40 @@ def snapshot():
     }
 
 
+def _finite_tree(value, depth=0):
+    """A copy of a snapshot with NaN and infinities replaced by None."""
+    if depth > 32:
+        raise ValueError("snapshot nested too deeply")
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _finite_tree(item, depth + 1) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite_tree(item, depth + 1) for item in value]
+    return value
+
+
+def encode(data):
+    """One JSON line the bar's JSON.parse accepts (never NaN or Infinity), or an
+    error line when the snapshot cannot be written."""
+    try:
+        return json.dumps(_finite_tree(data), allow_nan=False)
+    except (TypeError, ValueError, RecursionError) as exc:
+        return json.dumps({"error": f"snapshot not written: {type(exc).__name__}"})
+
+
 def main():
     once = "--once" in sys.argv
+    install_exit_handlers()
     snapshot()  # prime CPU counters
     time.sleep(0.5 if once else min(INTERVAL, 1))
     while True:
         try:
-            print(json.dumps(snapshot()), flush=True)
+            print(encode(snapshot()), flush=True)
         except BrokenPipeError:
             return 0
         except Exception as exc:  # keep streaming; the bar shows stale data otherwise
-            print(json.dumps({"error": str(exc)[:200]}), flush=True)
+            print(encode({"error": str(exc)[:200]}), flush=True)
         if once:
             return 0
         time.sleep(INTERVAL)
