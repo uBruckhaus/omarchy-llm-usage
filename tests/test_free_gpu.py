@@ -16,8 +16,13 @@ echo "$*" >> "$STUB_DIR/systemctl.log"
 for last; do :; done
 unit="${last%.service}"
 case "$*" in
-  *is-active*) eval "rc=\\${ACTIVE_$(echo "$unit" | tr - _):-3}"
+  *is-active*) var=$(echo "$unit" | tr - _)
+               eval "rc=\\${ACTIVE_$var:-3}; state=\\${STATE_$var:-}"
+               if [ -z "$state" ]; then
+                 case $rc in 0) state=active ;; 3|4) state=inactive ;; esac
+               fi
                [ "$rc" = 1 ] && echo "Failed to connect to user scope bus" >&2
+               case "$*" in *--quiet*) ;; *) [ -n "$state" ] && echo "$state" ;; esac
                exit "$rc" ;;
   *stop*) exit "${STOP_RC:-0}" ;;
 esac
@@ -80,6 +85,13 @@ class FreeGpu(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(title, "GPU memory freed")
         self.assertIn("llama-server", body)
+
+    def test_starting_unit_is_stopped(self):
+        code, title, body, calls = self.run_script(ACTIVE_llama_server=3, STATE_llama_server="activating",
+                                                   ACTIVE_ollama=3, STATE_ollama="failed")
+        self.assertEqual(code, 0)
+        self.assertEqual(title, "GPU memory freed")
+        self.assertEqual([call for call in calls if "stop" in call], ["--user stop llama-server.service"])
 
     def test_failed_stop(self):
         code, title, body, _ = self.run_script(ACTIVE_llama_server=0, STOP_RC=1)

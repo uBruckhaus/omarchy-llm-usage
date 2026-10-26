@@ -16,7 +16,11 @@ class BoundedFollowUpsTest(unittest.TestCase):
     def setUp(self):
         self.clock = [0.0]
         self.requests = []
+        self.monotonic = mon.time.monotonic
         mon.time.monotonic = lambda: self.clock[0]
+
+    def tearDown(self):
+        mon.time.monotonic = self.monotonic  # the time module is shared by every test
         mon.prometheus = lambda *_a, **_k: {}
 
     def squatter(self, rows, delay):

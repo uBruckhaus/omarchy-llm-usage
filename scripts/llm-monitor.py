@@ -24,6 +24,7 @@ import json
 import math
 import os
 import re
+import select
 import shutil
 import signal
 import socket
@@ -473,14 +474,11 @@ def context_memory(pid):
     if key not in _context_memory:
         tool = os.path.join(os.path.dirname(binary), "llama-fit-params")
         total = None
-        try:
-            result = run_helper([tool, *wanted, "-dev", "none", "-lv", "4"], timeout=30)
-            # "|   - Host   |   7444 =  4935 +  1877 +  631   |": model + context + compute
-            rows = re.findall(r"\|\s+- .*?\|\s+\d+\s*=\s*\d+\s*\+\s*(\d+)\s*\+\s*\d+", result.stderr + result.stdout)
-            if rows:
-                total = sum(int(row) for row in rows) * 2**20
-        except (OSError, subprocess.SubprocessError):
-            pass
+        output = run_helper([tool, *wanted, "-dev", "none", "-lv", "4"], timeout=30)
+        # "|   - Host   |   7444 =  4935 +  1877 +  631   |": model + context + compute
+        rows = re.findall(r"\|\s+- .*?\|\s+\d+\s*=\s*\d+\s*\+\s*(\d+)\s*\+\s*\d+", output or "")
+        if rows:
+            total = min(MAX_QUANTITY, sum(int(row) for row in rows[:64]) * 2**20)
         remember(_context_memory, key, total)
     return _context_memory[key]
 
@@ -505,14 +503,50 @@ def helper_argv(argv, parent=None):
     return [setpriv, "--pdeathsig", "KILL", "--", "/bin/sh", "-c", PARENT_GUARD, "sh", str(parent), *argv]
 
 
-def run_helper(argv, timeout):
-    """subprocess.run of a helper program, bound to the collector's lifetime."""
-    return subprocess.run(helper_argv(argv), capture_output=True, text=True, errors="replace", timeout=timeout,
-                          stdin=subprocess.DEVNULL)
+HELPER_OUTPUT_LIMIT = 2**20  # llama-fit-params prints a few KiB
+
+
+def run_helper(argv, timeout, limit=HELPER_OUTPUT_LIMIT):
+    """stdout and stderr of a helper program as one text, or None when it cannot
+    start, runs longer than `timeout` seconds or prints more than `limit` bytes.
+
+    The helper is bound to the collector's lifetime (helper_argv) and is killed
+    and reaped whenever this returns or raises (SystemExit on SIGTERM included).
+    """
+    try:
+        process = subprocess.Popen(helper_argv(argv), stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    deadline = time.monotonic() + timeout
+    output = bytearray()
+    try:
+        fd = process.stdout.fileno()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            if not select.select([fd], [], [], remaining)[0]:
+                continue
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            output += chunk
+            if len(output) > limit:
+                return None
+        process.wait(max(0.0, deadline - time.monotonic()))
+        return output.decode("utf-8", "replace")
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        process.stdout.close()
 
 
 def install_exit_handlers():
-    """SIGTERM / SIGHUP end the collector through SystemExit, so subprocess.run
+    """SIGTERM / SIGHUP end the collector through SystemExit, so run_helper
     kills and reaps a helper it is waiting on instead of leaving it behind."""
     def stop(signum, _frame):
         raise SystemExit(128 + signum)

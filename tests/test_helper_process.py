@@ -72,13 +72,29 @@ class HelperArgv(unittest.TestCase):
         mon.shutil.which = lambda name: None
         self.assertEqual(mon.helper_argv(["/x/llama-fit-params"]), ["/x/llama-fit-params"])
 
+    def test_output_is_bounded(self):
+        start = time.monotonic()
+        self.assertIsNone(mon.run_helper(["sh", "-c", "exec yes"], timeout=20, limit=2**20))
+        self.assertIsNone(mon.run_helper(["sh", "-c", "head -c 3000000 /dev/zero >&2"], timeout=20, limit=2**20))
+        self.assertLess(time.monotonic() - start, 10)
+
+    def test_timeout_kills_the_helper(self):
+        start = time.monotonic()
+        self.assertIsNone(mon.run_helper(["sleep", "30"], timeout=0.5))
+        self.assertLess(time.monotonic() - start, 5)
+
+    def test_output_of_both_streams(self):
+        text = mon.run_helper(["sh", "-c", "echo one >&2; echo two; printf '\\377'"], timeout=10)
+        self.assertIn("one", text)
+        self.assertIn("two", text)
+
     def test_no_preexec_fn(self):
         seen = {}
         real = mon.subprocess.Popen
 
         def fake_popen(argv, **kwargs):
             seen.update(kwargs, argv=argv)
-            return real(["true"])
+            return real(["true"], **kwargs)
         mon.subprocess.Popen = fake_popen
         try:
             mon.run_helper(["/nonexistent/llama-fit-params"], timeout=5)

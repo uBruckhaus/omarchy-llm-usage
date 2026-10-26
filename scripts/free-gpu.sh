@@ -6,13 +6,17 @@
 set -u
 freed=() failed=() unknown=()
 for unit in llama-server ollama vllm; do
-  # is-active: 0 active, 3 not active, 4 no such unit; anything else (e.g. no
-  # user bus) means the state is unknown, which is reported, not taken as "off".
-  timeout 10 systemctl --user is-active --quiet "$unit.service" 2>/dev/null
-  case $? in
-    0) ;;
-    3|4) continue ;;
-    *) unknown+=("$unit"); continue ;;
+  # A unit that is running or starting is stopped. is-active exits 3 for any
+  # other state (inactive, failed, ...) and 4 for no such unit; anything else
+  # (e.g. no user bus) means the state is unknown: reported, not taken as "off".
+  state="$(timeout 10 systemctl --user is-active "$unit.service" 2>/dev/null)"
+  rc=$?
+  case "$state" in
+    active|activating|reloading|refreshing) ;;
+    *) case $rc in
+         3|4) continue ;;
+         *) unknown+=("$unit"); continue ;;
+       esac ;;
   esac
   if timeout 60 systemctl --user stop "$unit.service" 2>/dev/null; then
     freed+=("$unit")
