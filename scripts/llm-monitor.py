@@ -580,6 +580,76 @@ def forget_models(runtime, listed):
             del _last_output[key]
 
 
+# llama.cpp's --sleep-idle-seconds frees the card only when no request comes in:
+# /slots and /metrics count as requests (router mode passes them on to the model),
+# so asking every INTERVAL kept an idle model loaded for good. The model's process
+# says whether it works: its CPU time grows while it computes (measured on ROCm:
+# ~190 ticks a second while generating, 0 when idle) and it writes to its sockets
+# while a reply streams out. Asked only then, and once right after (the counters
+# of a reply that just ended); the last figures are shown meanwhile. What our own
+# request makes it do is not counted: the baseline is read again after asking.
+BUSY_TICKS = 5  # clock ticks (1/100 s) between two looks: more is working
+_ticks = {}     # pid -> (CPU ticks, bytes written) at the last look
+_looked = set()  # pids looked at in this snapshot
+_quiet = {}     # model name -> last figures, (was busy at the last look, slots)
+
+
+def cpu_ticks(pid):
+    """utime + stime of a process, None when it cannot be read."""
+    stat = read(f"/proc/{pid}/stat")
+    try:
+        fields = stat[stat.rfind(")") + 2:].split()
+        return int(fields[11]) + int(fields[12])
+    except (IndexError, ValueError):
+        return None
+
+
+def written(pid):
+    """Bytes a process wrote (files and sockets: a streamed reply), None when its
+    io file cannot be read (another user's service)."""
+    for line in read(f"/proc/{pid}/io").splitlines():
+        if line.startswith("wchar:"):
+            try:
+                return int(line.split()[1])
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+def activity(pid):
+    """(CPU ticks, bytes written) of a process, None when either cannot be read:
+    then it is asked every time, as before, so no reply is missed."""
+    ticks = cpu_ticks(pid) if pid else None
+    wrote = written(pid) if ticks is not None else None
+    return None if wrote is None else (ticks, wrote)
+
+
+def model_busy(pid):
+    """Whether the model process worked since the last look (True when unknown)."""
+    now = activity(pid)
+    if now is None:
+        return True
+    _looked.add(pid)
+    previous = _ticks.get(pid)
+    _ticks[pid] = now
+    return previous is None or now[0] - previous[0] > BUSY_TICKS or now[1] > previous[1]
+
+
+def quiet_slots(name, pid, ask):
+    """The model's slots, asked only while it works (or just stopped): an idle
+    model is left alone so llama.cpp can put it to sleep."""
+    busy = model_busy(pid)
+    was_busy, last = _quiet.get(name, (True, None))
+    if busy or was_busy or last is None:
+        last = ask()
+        if pid in _ticks:  # what answering us cost it is not work
+            _ticks[pid] = activity(pid) or _ticks[pid]
+    else:
+        last = dict(last, generating=False)
+    _quiet[name] = (busy, last)
+    return last
+
+
 def speed_add(state, tokens, seconds):
     rate = finite(tokens / seconds) if tokens > 0 and seconds > 0 else None
     if rate is not None:
@@ -785,9 +855,39 @@ def proc_env(pid):
     return {key: value for key, _, value in pairs if key.startswith("LLAMA_ARG_")}
 
 
+# What names a llama-server's model on its command line; one without any is a router.
+MODEL_FLAGS = ("-m", "--model")
+HF_FLAGS = ("-hf", "-hfr", "--hf-repo")
+URL_FLAGS = ("-mu", "--model-url")
+
+
+def server_argv(pid):
+    """A process's arguments as it got them (spaces inside a path kept)."""
+    return [arg for arg in read(f"/proc/{pid}/cmdline").split("\0") if arg]
+
+
+def model_of_argv(argv):
+    """The model a llama-server runs, from its arguments (the last one wins), '' if none."""
+    name = ""
+    for index, arg in enumerate(argv[:-1]):
+        value = argv[index + 1]
+        if arg in URL_FLAGS:
+            # Only the path: a query or fragment (a token) is never shown.
+            value = urllib.parse.urlsplit(value).path
+        if arg in MODEL_FLAGS or arg in URL_FLAGS:
+            name = re.sub(r"\.gguf$", "", os.path.basename(value.rstrip("/")))
+        elif arg in HF_FLAGS:
+            name = value.split(":")[0].rstrip("/").split("/")[-1]
+    return clean(name) if name else ""
+
+
 def llamacpp_server_models(processes):
     models = []
-    data = http_json(PORTS["llamacpp"], "/models")
+    # A router runs without a model of its own and answers /models itself; a
+    # single-model server would count /models as a request and never sleep, so
+    # it is not asked (its model comes from its command line below).
+    router = not processes or any(not model_of_argv(server_argv(pid)) for pid, _, _ in processes)
+    data = http_json(PORTS["llamacpp"], "/models") if router else None
     stop = time.monotonic() + FOLLOW_UP_BUDGET
     rows = [row for row in listed(data, "data") if isinstance(row.get("status"), dict)
             and row["status"].get("value") in ("loaded", "loading", "sleeping")]
@@ -799,21 +899,28 @@ def llamacpp_server_models(processes):
         model = {"name": clean(row.get("id")), "state": state, "context": ctx}
         if state == "loaded" and time.monotonic() < stop:
             # The slots report the context as allocated (llama.cpp rounds -c up).
-            slots = llamacpp_slots(row.get("id"), unified)
+            slots = quiet_slots(model["name"], pid,
+                                lambda: llamacpp_slots(row.get("id"), unified))
             model.update(slots, context=slots.get("context") or ctx,
                          context_memory=context_memory(pid) if pid else None)
         models.append(model)
     forget_models("llamacpp", {model["name"] for model in models} | ({""} if not models else set()))
     if not models:
-        for pid, _, cmdline in processes:
-            name = model_from_cmdline(cmdline)
+        for pid, _, _ in processes:
+            argv = server_argv(pid)
+            name = model_of_argv(argv)
             if name:
-                argv = [arg for arg in read(f"/proc/{pid}/cmdline").split("\0") if arg]
                 ctx, unified = server_settings(argv[1:], proc_env(pid))
-                slots = llamacpp_slots(unified=unified)
+                slots = quiet_slots(name, pid, lambda: llamacpp_slots(unified=unified))
                 models.append({"name": name, "state": "loaded", **slots,
                                "context": slots.get("context") or ctx,
                                "context_memory": context_memory(pid)})
+    # Only what is loaded now is remembered (model ids come from the port).
+    for key in [k for k in _quiet if k not in {model["name"] for model in models}]:
+        del _quiet[key]
+    for gone in [p for p in _ticks if p not in _looked]:
+        del _ticks[gone]
+    _looked.clear()
     return models
 
 
