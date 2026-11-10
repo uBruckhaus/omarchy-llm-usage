@@ -6,6 +6,7 @@ import qs.Commons
 import qs.Commons as Commons
 import qs.Ui as Ui
 import "I18n.js" as I18n
+import "corners.js" as Corners
 
 // Bar indicator for local LLMs. Dim chip while nothing is loaded; accent chip
 // plus resident GPU memory while a runtime holds a model; the chip pulses
@@ -76,6 +77,21 @@ Ui.BarWidget {
     else next.language = code
     root.bar.shell.updateEntryInline(root.moduleName, next)
   }
+
+  // Corners of the panel's cards and controls, and the F12 screenshot key (settings page);
+  // both live in this widget's shell.json entry like the language, the defaults as no key.
+  readonly property string cornersSetting: Corners.choice(String(root.setting("corners", "windows")))
+  readonly property var corners: Corners.sizes(cornersSetting, Style.cornerRadius)
+  readonly property bool screenshotKey: root.setting("screenshotKey", true) !== false
+  function saveSetting(key, value, fallback) {
+    if (!root.bar || !root.bar.shell || typeof root.bar.shell.updateEntryInline !== "function") return
+    var next = Object.assign({}, root.settings || {})
+    if (value === fallback) delete next[key]
+    else next[key] = value
+    root.bar.shell.updateEntryInline(root.moduleName, next)
+  }
+  function setCorners(code) { saveSetting("corners", Corners.choice(code), "windows") }
+  function setScreenshotKey(on) { saveSetting("screenshotKey", on === true, true) }
 
   readonly property string barText: {
     if (!active) return "󰘚"
@@ -182,7 +198,7 @@ Ui.BarWidget {
       x: Style.space(6)
       width: (parent.width - 2 * x) * Math.max(0.03, root.contextFraction)
       height: Style.space(2)
-      radius: height / 2
+      radius: Math.min(root.corners.small, height / 2)
       color: root.contextColor
       Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
       Behavior on color { ColorAnimation { duration: 400 } }
