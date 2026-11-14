@@ -125,6 +125,9 @@ Panel {
     }
   }
 
+  // See-through with the window style (Theme Manager → Settings).
+  PopupGlass { inside: shot; active: panel.open }
+
   KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
